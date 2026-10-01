@@ -175,6 +175,13 @@ func pointer(doc any, path string) (any, bool) {
 			if part == "" || len(part) > 1 && part[0] == '0' {
 				return nil, false
 			}
+			// Array indices contain ASCII digits only: strconv.Atoi also accepts
+			// signed forms such as +1 and -0, which RFC 6901 does not permit.
+			for _, digit := range part {
+				if digit < '0' || digit > '9' {
+					return nil, false
+				}
+			}
 			i, err := strconv.Atoi(part)
 			if err != nil || i < 0 || i >= len(v) {
 				return nil, false
