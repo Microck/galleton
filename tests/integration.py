@@ -119,7 +119,7 @@ for (const id of ["oauth-account", "cookie-account"]) {
             assert json.loads(result.stdout)["status"] == "ready"
             assert "demo-refresh" not in result.stdout
             checks.append("CLI status works and does not print credentials")
-            for path in state_dir.glob("*.session"):
+            for path in state_dir.glob("*.session-v2"):
                 blob = path.read_bytes()
                 assert b"demo-refresh" not in blob and b"demo-cookie" not in blob
             checks.append("on-disk session entries contain no plaintext demo credentials")

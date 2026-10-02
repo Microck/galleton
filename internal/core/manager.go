@@ -179,31 +179,49 @@ func (m *Manager) Import(id string, in Import) (Metadata, error) {
 	if marshalErr != nil || len(encoded) > 1<<20 {
 		return Metadata{}, invalid("Combined imported credentials exceed the 1 MiB state limit.")
 	}
-	// Lock ordering is manager -> entry only here and in Forget. Other operations
-	// release the manager lock before locking the entry.
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	if old := m.entries[id]; old != nil {
+		m.mu.Unlock()
 		if !in.Replace {
-			return Metadata{}, problem(409, "already_exists", "Session exists; set replace=true to explicitly reconnect.")
+			return Metadata{}, problem(409, "already_exists", "Session exists; reconnect with replace=true and expected_revision.")
 		}
 		old.mu.Lock()
 		defer old.mu.Unlock()
+		m.mu.RLock()
+		current := m.entries[id] == old && !old.deleted
+		m.mu.RUnlock()
+		if !current || in.ExpectedRevision == nil || *in.ExpectedRevision != old.state.Revision {
+			return Metadata{}, problem(409, "revision_conflict", "Reconnect requires the current expected_revision; inspect status before retrying.")
+		}
+		if m.stopping.Load() {
+			return Metadata{}, problem(503, "shutting_down", "The daemon is shutting down.")
+		}
 		s.Revision = old.state.Revision + 1
 		if err := m.commit(old, s); err != nil {
 			return Metadata{}, err
 		}
 		return metadataOf(old), nil
 	}
+	if in.Replace || in.ExpectedRevision != nil {
+		m.mu.Unlock()
+		return Metadata{}, problem(409, "revision_conflict", "The session to reconnect no longer exists.")
+	}
+	if m.stopping.Load() {
+		m.mu.Unlock()
+		return Metadata{}, problem(503, "shutting_down", "The daemon is shutting down.")
+	}
 	if len(m.entries) >= 1024 {
+		m.mu.Unlock()
 		return Metadata{}, invalid("The local session limit was reached.")
 	}
 	e := &entry{state: s}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	m.entries[id] = e
+	m.mu.Unlock()
 	if err := m.commit(e, s); err != nil {
-		m.entries[id] = e
 		return Metadata{}, err
 	}
-	m.entries[id] = e
 	return metadataOf(e), nil
 }
 func (m *Manager) Status(id string) (Metadata, error) {
@@ -237,22 +255,25 @@ func (m *Manager) List() []Metadata {
 	return out
 }
 func (m *Manager) Forget(id string) error {
-	if err := checkID(id); err != nil {
+	e, err := m.get(id)
+	if err != nil {
 		return err
-	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	e := m.entries[id]
-	if e == nil {
-		return problem(404, "not_found", "Session not found.")
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	m.mu.RLock()
+	current := m.entries[id] == e && !e.deleted
+	m.mu.RUnlock()
+	if !current {
+		return problem(404, "not_found", "Session not found.")
+	}
 	if err := m.vault.Delete(id); err != nil {
 		return storageProblem()
 	}
 	e.deleted = true
+	m.mu.Lock()
 	delete(m.entries, id)
+	m.mu.Unlock()
 	return nil
 }
 
@@ -305,12 +326,16 @@ func (m *Manager) ensure(e *entry, force bool) error {
 	}
 	now := time.Now().UTC()
 	s := e.state
+	stillValid := s.AccessExpiresAt.IsZero() || now.Before(s.AccessExpiresAt)
 	if s.Status == "retry_wait" && now.Before(s.NextRefresh) {
+		if !force && stillValid {
+			return nil
+		}
 		p := problem(503, "retry_later", "Renewal is waiting for its retry deadline.")
 		p.RetryAt = s.NextRefresh
 		return p
 	}
-	if !force && s.Status == "ready" && now.Before(s.NextRefresh) && (s.AccessExpiresAt.IsZero() || now.Before(s.AccessExpiresAt)) {
+	if !force && s.Status == "ready" && now.Before(s.NextRefresh) && stillValid {
 		return nil
 	}
 	p := m.providers[s.Provider]
@@ -459,7 +484,7 @@ func (m *Manager) Capture(id, rawURL string, lines []string) (Metadata, error) {
 	n := cloneState(e.state)
 	n.Cookies, _, err = updateCookies(n.Cookies, u, cookies, time.Now().UTC())
 	if err != nil {
-		return Metadata{}, err
+		return Metadata{}, m.cookieCaptureFailure(e)
 	}
 	n.Revision++
 	if candidate := nextRefresh(n, p, time.Now().UTC()); candidate.Before(n.NextRefresh) {
@@ -550,7 +575,7 @@ func (m *Manager) Request(id string, in RequestInput) (RequestResult, error) {
 		n := cloneState(e.state)
 		n.Cookies, _, err = updateCookies(n.Cookies, u, cookies, time.Now().UTC())
 		if err != nil {
-			return RequestResult{}, problem(502, "protocol_error", "Too many upstream cookies.")
+			return RequestResult{}, m.cookieCaptureFailure(e)
 		}
 		n.Revision++
 		if candidate := nextRefresh(n, p, time.Now().UTC()); candidate.Before(n.NextRefresh) {
@@ -633,3 +658,28 @@ func AsProblem(err error) *Problem {
 
 // BeginShutdown rejects queued/new renewals while in-flight requests finish.
 func (m *Manager) BeginShutdown() { m.stopping.Store(true) }
+
+// FlushAll saves in-memory rotations after requests and scheduler work drain.
+// It never starts a new network operation, including during shutdown.
+func (m *Manager) FlushAll() error {
+	m.mu.RLock()
+	entries := make([]*entry, 0, len(m.entries))
+	for _, e := range m.entries { entries = append(entries, e) }
+	m.mu.RUnlock()
+	var result error
+	for _, e := range entries {
+		e.mu.Lock()
+		if !e.deleted { result = errors.Join(result, m.flush(e)) }
+		e.mu.Unlock()
+	}
+	return result
+}
+
+func (m *Manager) cookieCaptureFailure(e *entry) error {
+	n := cloneState(e.state)
+	n.Status = "uncertain"
+	n.LastError = problem(409, "renewal_uncertain", "Cookie capture failed after a resource response; automatic credential reuse is paused.")
+	n.Revision++
+	if err := m.commit(e, n); err != nil { return err }
+	return n.LastError
+}

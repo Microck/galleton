@@ -81,7 +81,7 @@ func run(args []string) error {
 		}
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 		defer stop()
-		// Include SIGTERM on Unix without referring to an unavailable Windows symbol.
+		// Handle platform termination signals as well as Ctrl-C.
 		registerTerminate(stop)
 		schedulerCtx, cancelScheduler := context.WithCancel(context.Background())
 		schedulerDone := make(chan struct{})
@@ -100,6 +100,10 @@ func run(args []string) error {
 		defer cancel()
 		shutdownErr := srv.Shutdown(shutdownCtx)
 		<-schedulerDone
+		flushErr := manager.FlushAll()
+		if flushErr != nil {
+			return errors.Join(shutdownErr, flushErr)
+		}
 		if shutdownErr != nil {
 			return shutdownErr
 		}

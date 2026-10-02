@@ -55,6 +55,7 @@ type Credentials struct {
 	AccessExpiresAt *time.Time        `json:"access_expires_at,omitempty"`
 	Secrets         map[string]string `json:"secrets,omitempty"`
 	Replace         bool              `json:"replace,omitempty"`
+	ExpectedRevision *uint64          `json:"expected_revision,omitempty"`
 }
 type Headers struct {
 	Headers   map[string]string `json:"headers"`

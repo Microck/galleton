@@ -21,7 +21,7 @@ func newUpstreamClient() *http.Client {
 	// No environment proxy, redirects, or reused connections. In particular, do
 	// not let the transport invisibly replay a refresh on a reused connection.
 	return &http.Client{
-		Transport:     &http.Transport{Proxy: nil, DialContext: (&net.Dialer{Timeout: 10 * time.Second}).DialContext, TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12}, TLSHandshakeTimeout: 10 * time.Second, ResponseHeaderTimeout: 20 * time.Second, MaxResponseHeaderBytes: 64 << 10, DisableKeepAlives: true},
+		Transport:     &http.Transport{Proxy: nil, DialContext: (&net.Dialer{Timeout: 10 * time.Second}).DialContext, TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12}, TLSHandshakeTimeout: 10 * time.Second, MaxResponseHeaderBytes: 64 << 10, DisableKeepAlives: true},
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}
 }
@@ -278,6 +278,8 @@ func performRefresh(s *State, p *Provider, client *http.Client, req *http.Reques
 	cookies, accepted, cookieErr := updateCookies(s.Cookies, req.URL, resp.Cookies(), now)
 	if cookieErr == nil {
 		s.Cookies = cookies
+	} else {
+		return problem(502, "protocol_error", "The provider returned more cookies than the session limit.")
 	}
 	raw, readErr := io.ReadAll(io.LimitReader(resp.Body, (1<<20)+1))
 	if readErr != nil || len(raw) > 1<<20 {
@@ -308,9 +310,6 @@ func performRefresh(s *State, p *Provider, client *http.Client, req *http.Reques
 		}
 		return problem(502, "protocol_error", "The provider rejected the renewal request.")
 	}
-	if cookieErr != nil {
-		return problem(502, "protocol_error", "The provider returned more cookies than the session limit.")
-	}
 	mapping := p.Response
 	if p.Kind == "oauth2" {
 		mapping = ResponseMapping{AccessToken: "/access_token", RefreshToken: "/refresh_token", ExpiresIn: "/expires_in"}
@@ -319,7 +318,11 @@ func performRefresh(s *State, p *Provider, client *http.Client, req *http.Reques
 	if needsJSON && jsonErr != nil {
 		return problem(502, "protocol_error", "Expected a JSON renewal response.")
 	}
-	if replacement, ok := tokenAt(doc, mapping.RefreshToken); ok {
+	if _, present := pointer(doc, mapping.RefreshToken); present {
+		replacement, ok := tokenAt(doc, mapping.RefreshToken)
+		if !ok {
+			return problem(502, "protocol_error", "Invalid replacement refresh token.")
+		}
 		s.RefreshToken = replacement
 	}
 	token, hasToken := tokenAt(doc, mapping.AccessToken)

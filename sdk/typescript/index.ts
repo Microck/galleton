@@ -9,6 +9,7 @@ export interface Credentials {
   access_expires_at?: string;
   secrets?: Record<string, string>;
   replace?: boolean;
+  expected_revision?: number;
 }
 export interface Problem { code: string; message: string; retry_at?: string }
 export interface SessionStatus {

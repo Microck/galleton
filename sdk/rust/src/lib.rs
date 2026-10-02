@@ -52,6 +52,8 @@ pub struct Credentials {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub secrets: Option<HashMap<String, String>>,
     pub replace: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_revision: Option<u64>,
 }
 #[derive(Debug, Clone, Deserialize)]
 pub struct SessionStatus {
@@ -122,8 +124,10 @@ impl Galleton {
         if raw.len() > 8 * 1024 * 1024 { return Err(Error::InvalidResponse); }
         if !(200..300).contains(&status) {
             #[derive(Deserialize)] struct Envelope { error: ApiError }
-            let envelope: Envelope = serde_json::from_slice(&raw).map_err(|_| Error::InvalidResponse)?;
-            return Err(Error::Api(status, envelope.error));
+            let error = serde_json::from_slice::<Envelope>(&raw).map(|e| e.error).unwrap_or_else(|_| ApiError {
+                code: "daemon_error".into(), message: "Galleton request failed.".into(), retry_at: None,
+            });
+            return Err(Error::Api(status, error));
         }
         serde_json::from_slice(&raw).map_err(|_| Error::InvalidResponse)
     }
@@ -170,4 +174,25 @@ mod tests {
     #[test] fn rejects_invalid_id() { assert!(path("../other").is_err()); }
     #[test] fn accepts_loopback() { assert!(Galleton::new("http://127.0.0.1:8766", "local").is_ok()); }
     #[test] fn rejects_header_injection() { assert!(Galleton::new("http://127.0.0.1:8766", "a\r\nb").is_err()); }
+    #[test]
+    fn malformed_error_bodies_preserve_status() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        for body in ["", "not json", "{", "{}"] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = std::thread::spawn(move || {
+                let (mut socket, _) = listener.accept().unwrap();
+                let mut request = [0u8; 4096];
+                socket.read(&mut request).unwrap();
+                write!(socket, "HTTP/1.1 503 Service Unavailable\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).unwrap();
+            });
+            let client = Galleton::new(&format!("http://{address}"), "local").unwrap();
+            match client.status("account") {
+                Err(Error::Api(status, error)) => { assert_eq!(status, 503); assert_eq!(error.code, "daemon_error"); }
+                _ => panic!("HTTP status lost"),
+            }
+            server.join().unwrap();
+        }
+    }
 }

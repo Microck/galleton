@@ -6,6 +6,7 @@ import (
 	"crypto/cipher"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -214,19 +215,43 @@ func (v *Vault) Save(s *State) error {
 	// across the package rename so existing explicit --dir state remains readable.
 	blob := append([]byte("SK01"), nonce...)
 	blob = v.aead.Seal(blob, nonce, raw, []byte("sessionkit:v1:"+s.ID))
-	return atomicWrite(filepath.Join(v.dir, s.ID+".session"), blob)
+	return atomicWrite(filepath.Join(v.dir, sessionFilename(s.ID)), blob)
 }
+
+func sessionFilename(id string) string {
+	return "s-" + hex.EncodeToString([]byte(id)) + ".session-v2"
+}
+
 func (v *Vault) LoadAll() ([]*State, error) {
 	entries, err := os.ReadDir(v.dir)
 	if err != nil {
 		return nil, err
 	}
 	out := []*State{}
+	current := map[string]bool{}
 	for _, f := range entries {
-		if !strings.HasSuffix(f.Name(), ".session") {
+		if strings.HasSuffix(f.Name(), ".session-v2") {
+			encoded := strings.TrimSuffix(strings.TrimPrefix(f.Name(), "s-"), ".session-v2")
+			raw, err := hex.DecodeString(encoded)
+			id := string(raw)
+			if err != nil || checkID(id) != nil || f.Name() != sessionFilename(id) {
+				return nil, errors.New("invalid session filename")
+			}
+			current[id] = true
+		}
+	}
+	type legacyEntry struct { name string; state *State }
+	var legacy []legacyEntry
+	for _, f := range entries {
+		isLegacy := strings.HasSuffix(f.Name(), ".session")
+		if !isLegacy && !strings.HasSuffix(f.Name(), ".session-v2") {
 			continue
 		}
 		id := strings.TrimSuffix(f.Name(), ".session")
+		if !isLegacy {
+			raw, _ := hex.DecodeString(strings.TrimSuffix(strings.TrimPrefix(f.Name(), "s-"), ".session-v2"))
+			id = string(raw)
+		}
 		if err := checkID(id); err != nil {
 			return nil, errors.New("invalid session filename")
 		}
@@ -246,10 +271,26 @@ func (v *Vault) LoadAll() ([]*State, error) {
 		if json.Unmarshal(plain, &s) != nil || s.ID != id {
 			return nil, errors.New("invalid vault state")
 		}
-		out = append(out, &s)
+		if isLegacy {
+			legacy = append(legacy, legacyEntry{f.Name(), &s})
+		}
+		if !isLegacy || !current[id] {
+			out = append(out, &s)
+		}
 		if len(out) > 1024 {
 			return nil, errors.New("too many sessions")
 		}
+	}
+	// New-format entries are authoritative after an interrupted migration.
+	// Validate every ciphertext before changing any legacy file.
+	for _, old := range legacy {
+		if !current[old.state.ID] {
+			if err := v.Save(old.state); err != nil { return nil, err }
+		}
+		if err := os.Remove(filepath.Join(v.dir, old.name)); err != nil { return nil, err }
+	}
+	if len(legacy) > 0 {
+		if err := syncDir(v.dir); err != nil { return nil, err }
 	}
 	return out, nil
 }
@@ -257,7 +298,7 @@ func (v *Vault) Delete(id string) error {
 	if err := checkID(id); err != nil {
 		return err
 	}
-	if err := os.Remove(filepath.Join(v.dir, id+".session")); err != nil && !os.IsNotExist(err) {
+	if err := os.Remove(filepath.Join(v.dir, sessionFilename(id))); err != nil && !os.IsNotExist(err) {
 		return err
 	}
 	return syncDir(v.dir)

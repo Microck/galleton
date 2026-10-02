@@ -190,7 +190,11 @@ Use the installer for your operating system, after initialization and after stop
 
 ## Failure and persistence contract
 
-`retry_wait` applies backoff and honors Retry-After. `storage_error` means a replacement credential has not been durably acknowledged; the daemon retries persistence before another renewal. `reauth_required`, `uncertain`, `configuration_error`, and `protocol_error` stop automatic renewal. Handle them through explicit provider-approved reconnection, using `replace: true`; do not hide them behind endless retries. `forget` removes local state but does not revoke credentials at the provider.
+`retry_wait` applies renewal backoff and honors Retry-After; credentials that remain valid are still available for resource requests. `storage_error` means a replacement credential has not been durably acknowledged; the daemon retries persistence before another renewal and flushes dirty credentials on shutdown. `reauth_required`, `uncertain`, `configuration_error`, and `protocol_error` stop automatic renewal. Handle them through explicit provider-approved reconnection; do not hide them behind endless retries. `forget` removes local state but does not revoke credentials at the provider.
+
+Reconnection requires `replace: true` and `expected_revision` from the current status. Supply freshly obtained credentials and that revision in the same connect request. Retrying a lost response must keep the original revision: a `revision_conflict` prevents overwriting a newer rotation. Do not fetch a newer revision just to replay the same credential payload; inspect status and obtain fresh provider credentials if another reconnect is needed. A replacement cannot create a missing session.
+
+Vault filenames use lowercase hex encoding of session IDs, preserving `Alice` and `alice` separately on case-insensitive filesystems and avoiding Windows device names. Legacy `.session` files migrate to `.session-v2` when the vault is loaded; the encrypted format and authenticated session IDs remain compatible.
 
 A pending encrypted checkpoint precedes every refresh. Restarting with an unfinished checkpoint becomes `uncertain` rather than replaying a potentially consumed token. This cannot eliminate the distributed failure window between a remote provider and local disk. Metadata exposes errors and deadlines; unknown times may appear as `0001-01-01T00:00:00Z`. There is no push-notification subsystem.
 

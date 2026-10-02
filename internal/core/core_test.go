@@ -231,7 +231,8 @@ func TestInvalidGrantStopsUntilReconnect(t *testing.T) {
 	if strings.Contains(err.Error(), "DO NOT ECHO") {
 		t.Fatal("provider response leaked")
 	}
-	_, err = m.Import("alice", Import{Provider: "test", RefreshToken: "new", Replace: true})
+	previous, _ := m.Status("alice")
+	_, err = m.Import("alice", Import{Provider: "test", RefreshToken: "new", Replace: true, ExpectedRevision: &previous.Revision})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -511,7 +512,7 @@ func TestVaultEncryptionTamperAndBinding(t *testing.T) {
 	if err := v.Save(s); err != nil {
 		t.Fatal(err)
 	}
-	path := filepath.Join(dir, "alice.session")
+	path := filepath.Join(dir, sessionFilename("alice"))
 	b, _ := os.ReadFile(path)
 	if bytes.Contains(b, []byte(s.RefreshToken)) {
 		t.Fatal("plaintext credential on disk")

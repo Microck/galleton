@@ -56,6 +56,7 @@ type Import struct {
 	AccessExpiresAt time.Time         `json:"access_expires_at,omitempty"`
 	Secrets         map[string]string `json:"secrets,omitempty"`
 	Replace         bool              `json:"replace,omitempty"`
+	ExpectedRevision *uint64          `json:"expected_revision,omitempty"`
 }
 
 // StoredCookie is deliberately pinned to the exact issuing origin, including port.

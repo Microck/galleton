@@ -74,7 +74,13 @@ export class Galleton {
         catch {
             throw new GalletonError("daemon_unavailable", "Galleton is unavailable or the local request timed out.");
         }
-        const text = await response.text();
+        let text;
+        try {
+            text = await response.text();
+        }
+        catch {
+            throw new GalletonError("daemon_unavailable", "Galleton response was interrupted; the request may already have completed.", response.status);
+        }
         if (text.length > 8 * 1024 * 1024)
             throw new GalletonError("invalid_response", "Oversized daemon response.");
         let decoded;
