@@ -244,10 +244,21 @@ func TestRejectedExternalCapturePersistsUncertainty(t *testing.T) {
 }
 
 func TestRejectedRenewalCookieRotationIsTerminal(t *testing.T) {
-	for _, setCookie := range []string{"sid=replacement; Secure; Path=/", "not a cookie"} {
-		t.Run(setCookie, func(t *testing.T) {
+	cases := []struct {
+		name       string
+		setCookies []string
+		wantCookie string
+	}{
+		{"rejected", []string{"sid=replacement; Secure; Path=/"}, "old"},
+		{"malformed", []string{"not a cookie"}, "old"},
+		{"mixed", []string{"sid=replacement; Path=/", "not a cookie"}, "replacement"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				w.Header().Add("Set-Cookie", setCookie)
+				for _, line := range tc.setCookies {
+					w.Header().Add("Set-Cookie", line)
+				}
 				_ = json.NewEncoder(w).Encode(map[string]any{
 					"access_token": "a1", "refresh_token": "r1",
 					"token_type": "Bearer", "expires_in": 3600,
@@ -265,9 +276,36 @@ func TestRejectedRenewalCookieRotationIsTerminal(t *testing.T) {
 			_, err = m.Headers("alice", server.URL)
 			wantCode(t, err, "protocol_error")
 			states, loadErr := v.LoadAll()
-			if loadErr != nil || len(states) != 1 || states[0].Status != "protocol_error" || states[0].RefreshToken != "r1" {
+			if loadErr != nil || len(states) != 1 || states[0].Status != "protocol_error" ||
+				states[0].RefreshToken != "r1" || len(states[0].Cookies) != 1 ||
+				states[0].Cookies[0].Cookie.Value != tc.wantCookie {
 				t.Fatalf("rejected renewal rotation was not terminal: %#v %v", states, loadErr)
 			}
 		})
+	}
+}
+
+func TestCookieDeletionCanAccompanyValidTokenRenewal(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.SetCookie(w, &http.Cookie{Name: "sid", Value: "", Path: "/", MaxAge: -1})
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"access_token": "a1", "refresh_token": "r1",
+			"token_type": "Bearer", "expires_in": 3600,
+		})
+	}))
+	defer server.Close()
+	m, v, _ := managerFor(t, providerFor(server.URL))
+	if _, err := m.Import("alice", Import{
+		Provider: "test", RefreshToken: "r0", CookieOrigin: server.URL, CookieHeader: "sid=old",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Refresh("alice"); err != nil {
+		t.Fatal(err)
+	}
+	states, err := v.LoadAll()
+	if err != nil || len(states) != 1 || states[0].Status != "ready" ||
+		states[0].RefreshToken != "r1" || len(states[0].Cookies) != 0 {
+		t.Fatalf("valid token renewal with deletion was rejected: %#v %v", states, err)
 	}
 }
