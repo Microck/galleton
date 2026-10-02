@@ -467,9 +467,9 @@ func TestCookieScopeExpiryDeletionAndPrefixes(t *testing.T) {
 		{Name: "partition", Value: "bad", Partitioned: true, Secure: true},
 		{Name: "__Host-good", Value: "good", Path: "/", Secure: true},
 	}
-	saved, accepted, err := updateCookies(nil, u, cookies, now)
-	if err != nil || accepted != 2 {
-		t.Fatalf("%v %d", err, accepted)
+	saved, accepted, retained, err := updateCookies(nil, u, cookies, now)
+	if err != nil || accepted != 2 || retained != 2 {
+		t.Fatalf("%v %d %d", err, accepted, retained)
 	}
 	if saved[0].Cookie.MaxAge != 0 || !saved[0].Cookie.Expires.Equal(now.Add(time.Minute)) {
 		t.Fatal("Max-Age not converted to absolute expiry")
@@ -487,9 +487,12 @@ func TestCookieScopeExpiryDeletionAndPrefixes(t *testing.T) {
 		t.Fatal("cookie path widened")
 	}
 	deleteCookie := &http.Cookie{Name: "sid", Value: "", Path: "/api", MaxAge: -1}
-	saved, _, err = updateCookies(saved, u, []*http.Cookie{deleteCookie}, now.Add(time.Second))
+	saved, accepted, retained, err = updateCookies(saved, u, []*http.Cookie{deleteCookie}, now.Add(time.Second))
 	if err != nil {
 		t.Fatal(err)
+	}
+	if accepted != 1 || retained != 0 {
+		t.Fatalf("deletion accounting: accepted=%d retained=%d", accepted, retained)
 	}
 	if strings.Contains(cookieHeaders(saved, u, now.Add(2*time.Second)), "sid=") {
 		t.Fatal("deleted cookie resurrected")
@@ -497,7 +500,7 @@ func TestCookieScopeExpiryDeletionAndPrefixes(t *testing.T) {
 }
 func TestCookieDefaultPathAndSecure(t *testing.T) {
 	u, _ := url.Parse("https://example.test/a/b")
-	saved, _, _ := updateCookies(nil, u, []*http.Cookie{{Name: "x", Value: "v", Secure: true}}, time.Now())
+	saved, _, _, _ := updateCookies(nil, u, []*http.Cookie{{Name: "x", Value: "v", Secure: true}}, time.Now())
 	if saved[0].Cookie.Path != "/a" {
 		t.Fatal(saved[0].Cookie.Path)
 	}

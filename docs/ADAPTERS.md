@@ -85,11 +85,11 @@ Response selectors use RFC 6901 JSON pointers, not JSONPath. `/data/tokens/0/val
 | `expires_in_pointer` | Optional positive integer seconds. If the field is absent, no expiry is invented. |
 | `expires_at_pointer` | When configured, must select a future RFC3339 time string. |
 | `success_pointer` | When configured, must select the JSON boolean `true`. |
-| `require_set_cookie` | Require at least one accepted cookie update, including deletions. It does not prove indefinite authorization. |
+| `require_set_cookie` | Require at least one accepted, retained replacement cookie. Deletions are honored but are not renewal evidence. It does not prove indefinite authorization. |
 
 A 2xx response alone does not count as renewal. The adapter must receive a configured access token, an accepted cookie update, or a configured successful boolean check. An HTML login page with no such evidence is not treated as successful renewal.
 
-A `Set-Cookie` deletion is honored. `Max-Age` becomes a fixed absolute timestamp before persistence; restoring the state cannot reset that countdown. Session cookies without expiry can be retained, but their server-side validity remains provider-controlled. Invalid-domain cookies and invalid `__Host-`/`__Secure-` cookies are discarded. Partitioned cookies are not supported. A profile is limited to 256 cookies.
+A `Set-Cookie` deletion is accepted and honored, but a deletion alone does not prove that usable credentials were renewed. `Max-Age` becomes a fixed absolute timestamp before persistence; restoring the state cannot reset that countdown. Session cookies without expiry can be retained, but their server-side validity remains provider-controlled. Invalid-domain cookies and invalid `__Host-`/`__Secure-` cookies are discarded. Partitioned cookies are not supported. A profile is limited to 256 cookies.
 
 ## Failure and retry details
 

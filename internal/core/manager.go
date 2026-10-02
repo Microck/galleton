@@ -58,6 +58,7 @@ func NewManager(v *Vault, c Config) (*Manager, error) {
 			changed = true
 		}
 		if changed {
+			boundTerminalState(s)
 			if err = v.Save(s); err != nil {
 				return nil, err
 			}
@@ -82,6 +83,17 @@ func stateFitsVault(s *State) bool {
 	probe.UpdatedAt = time.Date(2000, 1, 1, 0, 0, 0, 999999999, time.UTC)
 	raw, err := json.Marshal(probe)
 	return err == nil && len(raw) <= 1<<20
+}
+func boundTerminalState(s *State) {
+	if stateFitsVault(s) {
+		return
+	}
+	s.AccessToken = ""
+	s.RefreshToken = ""
+	s.AccessExpiresAt = time.Time{}
+	s.Secrets = map[string]string{}
+	s.Cookies = nil
+	s.NextRefresh = time.Time{}
 }
 func (m *Manager) get(id string) (*entry, error) {
 	if err := checkID(id); err != nil {
@@ -177,7 +189,7 @@ func (m *Manager) Import(id string, in Import) (Metadata, error) {
 			return Metadata{}, err
 		}
 		cookies = append(cookies, parsed...)
-		s.Cookies, _, err = updateCookies(nil, u, cookies, now)
+		s.Cookies, _, _, err = updateCookies(nil, u, cookies, now)
 		if err != nil {
 			return Metadata{}, err
 		}
@@ -508,7 +520,7 @@ func (m *Manager) Capture(id, rawURL string, lines []string) (Metadata, error) {
 		return Metadata{}, m.cookieCaptureFailure(e)
 	}
 	n := cloneState(e.state)
-	n.Cookies, _, err = updateCookies(n.Cookies, u, cookies, time.Now().UTC())
+	n.Cookies, _, _, err = updateCookies(n.Cookies, u, cookies, time.Now().UTC())
 	if err != nil {
 		return Metadata{}, m.cookieCaptureFailure(e)
 	}
@@ -623,9 +635,14 @@ func (m *Manager) Request(id string, in RequestInput) (RequestResult, error) {
 	// before reading/returning an application response body.
 	n := cloneState(e.state)
 	n.PendingRequest = false
-	if cookies := resp.Cookies(); len(cookies) > 0 {
-		n.Cookies, _, err = updateCookies(n.Cookies, u, cookies, time.Now().UTC())
-		if err != nil {
+	if lines := resp.Header.Values("Set-Cookie"); len(lines) > 0 {
+		cookies, parseErr := parseSetCookies(lines)
+		if parseErr != nil {
+			return RequestResult{}, m.cookieCaptureFailure(e)
+		}
+		var retained int
+		n.Cookies, _, retained, err = updateCookies(n.Cookies, u, cookies, time.Now().UTC())
+		if err != nil || retained == 0 {
 			return RequestResult{}, m.cookieCaptureFailure(e)
 		}
 		n.Revision++
@@ -747,12 +764,7 @@ func (m *Manager) boundedUncertain(e *entry, message string) error {
 	if !stateFitsVault(n) {
 		// The previous state was durable, but adding terminal metadata can cross
 		// the limit. Drop credentials rather than leave a reusable disk copy.
-		n.AccessToken = ""
-		n.RefreshToken = ""
-		n.AccessExpiresAt = time.Time{}
-		n.Secrets = map[string]string{}
-		n.Cookies = nil
-		n.NextRefresh = time.Time{}
+		boundTerminalState(n)
 	}
 	if err := m.commit(e, n); err != nil {
 		return err

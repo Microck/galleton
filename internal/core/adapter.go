@@ -275,7 +275,7 @@ func performRefresh(s *State, p *Provider, client *http.Client, req *http.Reques
 	}
 	defer resp.Body.Close()
 	now := time.Now().UTC()
-	cookies, accepted, cookieErr := updateCookies(s.Cookies, req.URL, resp.Cookies(), now)
+	cookies, _, retained, cookieErr := updateCookies(s.Cookies, req.URL, resp.Cookies(), now)
 	if cookieErr == nil {
 		s.Cookies = cookies
 	} else {
@@ -367,10 +367,10 @@ func performRefresh(s *State, p *Provider, client *http.Client, req *http.Reques
 			return problem(502, "protocol_error", "The adapter's success check did not pass.")
 		}
 	}
-	if mapping.RequireSetCookie && accepted == 0 {
+	if mapping.RequireSetCookie && retained == 0 {
 		return problem(502, "protocol_error", "The adapter requires a valid Set-Cookie renewal response.")
 	}
-	if !hasToken && accepted == 0 && !success {
+	if !hasToken && retained == 0 && !success {
 		return problem(502, "protocol_error", "No renewal evidence: configure a token field, a success field, or require replacement cookies.")
 	}
 	return nil

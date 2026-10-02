@@ -48,7 +48,7 @@ func cookieHeaders(cookies []StoredCookie, u *url.URL, now time.Time) string {
 	return req.Header.Get("Cookie")
 }
 
-func updateCookies(existing []StoredCookie, u *url.URL, incoming []*http.Cookie, now time.Time) ([]StoredCookie, int, error) {
+func updateCookies(existing []StoredCookie, u *url.URL, incoming []*http.Cookie, now time.Time) ([]StoredCookie, int, int, error) {
 	_, origin, _ := canonicalURL(u.String())
 	out := make([]StoredCookie, 0, len(existing)+len(incoming))
 	for _, e := range existing {
@@ -57,6 +57,7 @@ func updateCookies(existing []StoredCookie, u *url.URL, incoming []*http.Cookie,
 		}
 	}
 	accepted := 0
+	retained := 0
 	for _, raw := range incoming {
 		c := *raw
 		if c.Valid() != nil || c.Partitioned {
@@ -102,15 +103,16 @@ func updateCookies(existing []StoredCookie, u *url.URL, incoming []*http.Cookie,
 			filtered = append(filtered, old)
 		}
 		out = filtered
+		accepted++
 		if !remove {
 			out = append(out, StoredCookie{origin, c, created})
-			accepted++
+			retained++
 		}
 	}
 	if len(out) > 256 {
-		return nil, 0, invalid("A session may contain at most 256 cookies.")
+		return nil, 0, 0, invalid("A session may contain at most 256 cookies.")
 	}
-	return out, accepted, nil
+	return out, accepted, retained, nil
 }
 func parseSetCookies(lines []string) ([]*http.Cookie, error) {
 	out := make([]*http.Cookie, 0, len(lines))

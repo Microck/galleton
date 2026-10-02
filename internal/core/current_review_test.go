@@ -158,3 +158,68 @@ func TestWindowsTaskHasRecurringRecoveryTrigger(t *testing.T) {
 		}
 	}
 }
+
+func TestRejectedManagedCookieRotationPersistsUncertainty(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.SetCookie(w, &http.Cookie{Name: "sid", Value: "replacement", Path: "/", Secure: true})
+		_, _ = fmt.Fprint(w, "ok")
+	}))
+	defer server.Close()
+	m, v, _ := managerFor(t, providerFor(server.URL))
+	if _, err := m.Import("alice", Import{
+		Provider: "test", RefreshToken: "r0", CookieOrigin: server.URL, CookieHeader: "sid=old",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	e, _ := m.get("alice")
+	e.state.NextRefresh = time.Now().Add(time.Hour)
+	_, err := m.Request("alice", RequestInput{URL: server.URL})
+	wantCode(t, err, "renewal_uncertain")
+	_, err = m.Headers("alice", server.URL)
+	wantCode(t, err, "renewal_uncertain")
+	states, loadErr := v.LoadAll()
+	if loadErr != nil || len(states) != 1 || states[0].Status != "uncertain" {
+		t.Fatalf("rejected managed rotation was not quarantined: %#v %v", states, loadErr)
+	}
+}
+
+func TestStartupRecoveryBoundsTerminalMetadata(t *testing.T) {
+	m, v, dir := managerFor(t, providerFor("http://127.0.0.1:11111"))
+	now := time.Now().UTC()
+	s := &State{
+		ID: "alice", Provider: "test", ConfigHash: m.providers["test"].hash,
+		Status: "ready", Revision: 1, CreatedAt: now, UpdatedAt: now,
+		PendingRequest: true, Secrets: map[string]string{"padding": ""},
+	}
+	raw, err := json.Marshal(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Secrets["padding"] = strings.Repeat("x", (1<<20)-len(raw))
+	raw, err = json.Marshal(s)
+	if err != nil || len(raw) != 1<<20 {
+		t.Fatalf("boundary setup produced %d bytes: %v", len(raw), err)
+	}
+	if err = v.Save(s); err != nil {
+		t.Fatal(err)
+	}
+	if err = v.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := OpenVault(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	recovered, err := NewManager(reopened, Config{Providers: []Provider{providerFor("http://127.0.0.1:11111")}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e, err := recovered.get("alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e.state.Status != "uncertain" || e.state.PendingRequest || len(e.state.Secrets) != 0 || !stateFitsVault(e.state) {
+		t.Fatalf("startup recovery did not persist bounded uncertainty: %#v", e.state)
+	}
+}
