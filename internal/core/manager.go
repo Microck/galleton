@@ -185,10 +185,6 @@ func (m *Manager) Import(id string, in Import) (Metadata, error) {
 	if s.AccessToken == "" && s.RefreshToken == "" && len(s.Cookies) == 0 && len(s.Secrets) == 0 {
 		return Metadata{}, invalid("No usable credentials were supplied.")
 	}
-	encoded, marshalErr := json.Marshal(s)
-	if marshalErr != nil || len(encoded) > 1<<20 {
-		return Metadata{}, invalid("Combined imported credentials exceed the 1 MiB state limit.")
-	}
 	m.mu.Lock()
 	if old := m.entries[id]; old != nil {
 		m.mu.Unlock()
@@ -211,6 +207,9 @@ func (m *Manager) Import(id string, in Import) (Metadata, error) {
 			return Metadata{}, storageProblem()
 		}
 		s.Revision = revision
+		if !stateFitsVault(s) {
+			return Metadata{}, invalid("Combined imported credentials exceed the 1 MiB state limit.")
+		}
 		if err := m.commit(old, s); err != nil {
 			return Metadata{}, err
 		}
@@ -234,6 +233,10 @@ func (m *Manager) Import(id string, in Import) (Metadata, error) {
 		return Metadata{}, storageProblem()
 	}
 	s.Revision = revision
+	if !stateFitsVault(s) {
+		m.mu.Unlock()
+		return Metadata{}, invalid("Combined imported credentials exceed the 1 MiB state limit.")
+	}
 	e := &entry{state: s}
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -415,6 +418,9 @@ func (m *Manager) ensure(e *entry, force bool) error {
 			pending.Status = "protocol_error"
 		}
 	}
+	if !stateFitsVault(pending) {
+		return m.boundedUncertain(e, "Renewal produced credentials too large to persist; automatic credential reuse is paused.")
+	}
 	if err := m.commit(e, pending); err != nil {
 		return err
 	}
@@ -499,7 +505,7 @@ func (m *Manager) Capture(id, rawURL string, lines []string) (Metadata, error) {
 	}
 	cookies, err := parseSetCookies(lines)
 	if err != nil {
-		return Metadata{}, err
+		return Metadata{}, m.cookieCaptureFailure(e)
 	}
 	n := cloneState(e.state)
 	n.Cookies, _, err = updateCookies(n.Cookies, u, cookies, time.Now().UTC())
@@ -728,10 +734,15 @@ func (m *Manager) FlushAll() error {
 }
 
 func (m *Manager) cookieCaptureFailure(e *entry) error {
+	return m.boundedUncertain(e, "Cookie capture failed after a resource response; automatic credential reuse is paused.")
+}
+
+func (m *Manager) boundedUncertain(e *entry, message string) error {
 	n := cloneState(e.state)
 	n.PendingRequest = false
+	n.PendingRefresh = false
 	n.Status = "uncertain"
-	n.LastError = problem(409, "renewal_uncertain", "Cookie capture failed after a resource response; automatic credential reuse is paused.")
+	n.LastError = problem(409, "renewal_uncertain", message)
 	n.Revision++
 	if !stateFitsVault(n) {
 		// The previous state was durable, but adding terminal metadata can cross
@@ -750,13 +761,5 @@ func (m *Manager) cookieCaptureFailure(e *entry) error {
 }
 
 func (m *Manager) resourceRequestFailure(e *entry) error {
-	n := cloneState(e.state)
-	n.PendingRequest = false
-	n.Status = "uncertain"
-	n.LastError = problem(409, "renewal_uncertain", "The upstream connection closed before a resource response was received; automatic credential reuse is paused.")
-	n.Revision++
-	if err := m.commit(e, n); err != nil {
-		return err
-	}
-	return n.LastError
+	return m.boundedUncertain(e, "The upstream connection closed before a resource response was received; automatic credential reuse is paused.")
 }

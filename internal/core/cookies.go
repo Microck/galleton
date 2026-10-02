@@ -104,8 +104,8 @@ func updateCookies(existing []StoredCookie, u *url.URL, incoming []*http.Cookie,
 		out = filtered
 		if !remove {
 			out = append(out, StoredCookie{origin, c, created})
+			accepted++
 		}
-		accepted++
 	}
 	if len(out) > 256 {
 		return nil, 0, invalid("A session may contain at most 256 cookies.")

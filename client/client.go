@@ -127,7 +127,10 @@ func (c *Client) call(ctx context.Context, method, path string, in, out any) err
 	}
 	defer resp.Body.Close()
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, (8<<20)+1))
-	if err != nil || len(raw) > 8<<20 {
+	if err != nil {
+		return &Error{Code: "daemon_unavailable", Message: "Galleton response was interrupted; the request may already have completed.", Status: resp.StatusCode}
+	}
+	if len(raw) > 8<<20 {
 		return errors.New("invalid or oversized Galleton response")
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {

@@ -120,7 +120,11 @@ impl Galleton {
         let response = req.send().map_err(|_| Error::Unavailable)?;
         let status = response.status().as_u16();
         let mut raw = Vec::new();
-        response.take(8 * 1024 * 1024 + 1).read_to_end(&mut raw).map_err(|_| Error::InvalidResponse)?;
+        response.take(8 * 1024 * 1024 + 1).read_to_end(&mut raw).map_err(|_| Error::Api(status, ApiError {
+            code: "daemon_unavailable".into(),
+            message: "Galleton response was interrupted; the request may already have completed.".into(),
+            retry_at: None,
+        }))?;
         if raw.len() > 8 * 1024 * 1024 { return Err(Error::InvalidResponse); }
         if !(200..300).contains(&status) {
             #[derive(Deserialize)] struct Envelope { error: ApiError }
@@ -194,5 +198,28 @@ mod tests {
             }
             server.join().unwrap();
         }
+    }
+    #[test]
+    fn interrupted_response_body_preserves_ambiguous_status() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let mut request = [0u8; 4096];
+            socket.read(&mut request).unwrap();
+            write!(socket, "HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: close\r\n\r\n{{}}").unwrap();
+        });
+        let client = Galleton::new(&format!("http://{address}"), "local").unwrap();
+        match client.status("account") {
+            Err(Error::Api(status, error)) => {
+                assert_eq!(status, 200);
+                assert_eq!(error.code, "daemon_unavailable");
+                assert!(error.message.contains("may already have completed"));
+            }
+            other => panic!("interrupted response lost ambiguity: {other:?}"),
+        }
+        server.join().unwrap();
     }
 }

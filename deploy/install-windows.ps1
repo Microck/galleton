@@ -29,12 +29,17 @@ function Quote-WindowsArgument([string]$Value) {
 }
 $Arguments = 'serve --dir {0} --config {1}' -f (Quote-WindowsArgument $StateDir), (Quote-WindowsArgument $Config)
 $Action = New-ScheduledTaskAction -Execute $Binary -Argument $Arguments
-$Trigger = New-ScheduledTaskTrigger -AtLogOn -User $User
+$LogonTrigger = New-ScheduledTaskTrigger -AtLogOn -User $User
+# IgnoreNew makes this a cheap health check while the daemon is running. If it
+# exits after exhausting the immediate restart attempts, the recurring trigger
+# starts it again without requiring the user to log out and back in.
+$RecoveryTrigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(5) `
+    -RepetitionInterval (New-TimeSpan -Minutes 5)
 $Principal = New-ScheduledTaskPrincipal -UserId $User -LogonType Interactive -RunLevel Limited
 $Settings = New-ScheduledTaskSettingsSet -StartWhenAvailable `
     -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
     -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::Zero) `
     -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
-Register-ScheduledTask -TaskName "Galleton" -Action $Action -Trigger $Trigger `
+Register-ScheduledTask -TaskName "Galleton" -Action $Action -Trigger @($LogonTrigger, $RecoveryTrigger) `
     -Principal $Principal -Settings $Settings -Force | Out-Null
 Start-ScheduledTask -TaskName "Galleton"
