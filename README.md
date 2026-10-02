@@ -137,7 +137,7 @@ The Rust SDK is blocking; use a worker thread in async applications. Its depende
 
 Use HTTP/JSON at `http://127.0.0.1:8766`, authenticating with `Authorization: Bearer <contents of api.token>`. See [OpenAPI](docs/openapi.json).
 
-All clients expose `connect`, `status`, `list`, `refresh`, `headers`, `capture`, `forget`, and `request`. Managed `request` attaches authentication and persists response cookies before returning. Upstream non-2xx statuses are returned; resource calls are never automatically retried. Requests are limited to 1 MiB bodies and responses to 4 MiB, buffered rather than streamed.
+All clients expose `connect`, `status`, `list`, `refresh`, `headers`, `capture`, `forget`, and `request`. Managed `request` durably checkpoints before sending authentication and persists response cookies before returning. Restarting with an unfinished request pauses the session as `uncertain`, requiring explicit reconnection. Upstream non-2xx statuses are returned; resource calls are never automatically retried. Requests are limited to 1 MiB bodies and responses to 4 MiB, buffered rather than streamed.
 
 For an existing HTTP transport, obtain `headers(id, url)`, make the request, and pass each separate `Set-Cookie` value to `capture(id, url, values)`. Do not join Set-Cookie lines with commas. You own redirect safety and concurrency in that mode: use managed requests when resource calls can rotate single-use session cookies. Never log returned credential headers.
 

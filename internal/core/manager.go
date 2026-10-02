@@ -45,10 +45,11 @@ func NewManager(v *Vault, c Config) (*Manager, error) {
 	m := &Manager{entries: map[string]*entry{}, providers: providers, vault: v, upstream: newUpstreamClient()}
 	for _, s := range states {
 		changed := false
-		if s.PendingRefresh {
+		if s.PendingRefresh || s.PendingRequest {
 			s.PendingRefresh = false
+			s.PendingRequest = false
 			s.Status = "uncertain"
-			s.LastError = problem(409, "renewal_uncertain", "The process stopped during renewal; automatic replay is paused.")
+			s.LastError = problem(409, "renewal_uncertain", "The process stopped during a credential-bearing operation; automatic replay is paused.")
 			changed = true
 		}
 		if p, ok := providers[s.Provider]; !ok || s.ConfigHash != p.hash {
@@ -580,17 +581,32 @@ func (m *Manager) Request(id string, in RequestInput) (RequestResult, error) {
 	req = req.WithContext(httptrace.WithClientTrace(req.Context(), &httptrace.ClientTrace{
 		GotConn: func(httptrace.GotConnInfo) { connected.Store(true) },
 	}))
+	// Persist before any credential can reach the upstream. A restart must
+	// treat an unfinished request as ambiguous, just like an unfinished renewal.
+	pending := cloneState(e.state)
+	pending.PendingRequest = true
+	if err := m.vault.Save(pending); err != nil {
+		return RequestResult{}, storageProblem()
+	}
+	e.state = pending
 	resp, err := m.upstream.Do(req)
 	if err != nil {
 		if connected.Load() {
 			return RequestResult{}, m.resourceRequestFailure(e)
 		}
+		n := cloneState(e.state)
+		n.PendingRequest = false
+		if err := m.commit(e, n); err != nil {
+			return RequestResult{}, err
+		}
 		return RequestResult{}, problem(502, "upstream_request_failed", "The upstream response was not received. The resource request was not retried; its side effects may be unknown.")
 	}
 	defer resp.Body.Close()
-	// Capture credentials before reading/returning an application response body.
+	// Capture credentials and clear the checkpoint in the same durable write
+	// before reading/returning an application response body.
+	n := cloneState(e.state)
+	n.PendingRequest = false
 	if cookies := resp.Cookies(); len(cookies) > 0 {
-		n := cloneState(e.state)
 		n.Cookies, _, err = updateCookies(n.Cookies, u, cookies, time.Now().UTC())
 		if err != nil {
 			return RequestResult{}, m.cookieCaptureFailure(e)
@@ -599,9 +615,9 @@ func (m *Manager) Request(id string, in RequestInput) (RequestResult, error) {
 		if candidate := nextRefresh(n, p, time.Now().UTC()); candidate.Before(n.NextRefresh) {
 			n.NextRefresh = candidate
 		}
-		if err = m.commit(e, n); err != nil {
-			return RequestResult{}, err
-		}
+	}
+	if err = m.commit(e, n); err != nil {
+		return RequestResult{}, err
 	}
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, (4<<20)+1))
 	if err != nil {
@@ -682,12 +698,16 @@ func (m *Manager) BeginShutdown() { m.stopping.Store(true) }
 func (m *Manager) FlushAll() error {
 	m.mu.RLock()
 	entries := make([]*entry, 0, len(m.entries))
-	for _, e := range m.entries { entries = append(entries, e) }
+	for _, e := range m.entries {
+		entries = append(entries, e)
+	}
 	m.mu.RUnlock()
 	var result error
 	for _, e := range entries {
 		e.mu.Lock()
-		if !e.deleted { result = errors.Join(result, m.flush(e)) }
+		if !e.deleted {
+			result = errors.Join(result, m.flush(e))
+		}
 		e.mu.Unlock()
 	}
 	return result
@@ -695,18 +715,24 @@ func (m *Manager) FlushAll() error {
 
 func (m *Manager) cookieCaptureFailure(e *entry) error {
 	n := cloneState(e.state)
+	n.PendingRequest = false
 	n.Status = "uncertain"
 	n.LastError = problem(409, "renewal_uncertain", "Cookie capture failed after a resource response; automatic credential reuse is paused.")
 	n.Revision++
-	if err := m.commit(e, n); err != nil { return err }
+	if err := m.commit(e, n); err != nil {
+		return err
+	}
 	return n.LastError
 }
 
 func (m *Manager) resourceRequestFailure(e *entry) error {
 	n := cloneState(e.state)
+	n.PendingRequest = false
 	n.Status = "uncertain"
 	n.LastError = problem(409, "renewal_uncertain", "The upstream connection closed before a resource response was received; automatic credential reuse is paused.")
 	n.Revision++
-	if err := m.commit(e, n); err != nil { return err }
+	if err := m.commit(e, n); err != nil {
+		return err
+	}
 	return n.LastError
 }

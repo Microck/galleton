@@ -47,16 +47,16 @@ type Config struct {
 }
 
 type Import struct {
-	Provider        string            `json:"provider"`
-	CookieOrigin    string            `json:"cookie_origin,omitempty"`
-	CookieHeader    string            `json:"cookie_header,omitempty"`
-	SetCookies      []string          `json:"set_cookies,omitempty"`
-	AccessToken     string            `json:"access_token,omitempty"`
-	RefreshToken    string            `json:"refresh_token,omitempty"`
-	AccessExpiresAt time.Time         `json:"access_expires_at,omitempty"`
-	Secrets         map[string]string `json:"secrets,omitempty"`
-	Replace         bool              `json:"replace,omitempty"`
-	ExpectedRevision *uint64          `json:"expected_revision,omitempty"`
+	Provider         string            `json:"provider"`
+	CookieOrigin     string            `json:"cookie_origin,omitempty"`
+	CookieHeader     string            `json:"cookie_header,omitempty"`
+	SetCookies       []string          `json:"set_cookies,omitempty"`
+	AccessToken      string            `json:"access_token,omitempty"`
+	RefreshToken     string            `json:"refresh_token,omitempty"`
+	AccessExpiresAt  time.Time         `json:"access_expires_at,omitempty"`
+	Secrets          map[string]string `json:"secrets,omitempty"`
+	Replace          bool              `json:"replace,omitempty"`
+	ExpectedRevision *uint64           `json:"expected_revision,omitempty"`
 }
 
 // StoredCookie is deliberately pinned to the exact issuing origin, including port.
@@ -82,6 +82,7 @@ type State struct {
 	RefreshToken    string            `json:"refresh_token,omitempty"`
 	Secrets         map[string]string `json:"secrets,omitempty"`
 	Cookies         []StoredCookie    `json:"cookies,omitempty"`
+	PendingRequest  bool              `json:"pending_request,omitempty"`
 	PendingRefresh  bool              `json:"pending_refresh,omitempty"`
 	Failures        int               `json:"failures,omitempty"`
 	LastError       *Problem          `json:"last_error,omitempty"`
