@@ -355,3 +355,19 @@ func TestCookieDeletionIsAcceptedByCaptureAndManagedRequest(t *testing.T) {
 		}
 	})
 }
+
+func TestImportRejectsCookieOutsideOrigin(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer server.Close()
+	m, _, _ := managerFor(t, providerFor(server.URL))
+	_, err := m.Import("alice", Import{
+		Provider:     "test",
+		RefreshToken: "r0",
+		CookieOrigin: server.URL,
+		SetCookies:   []string{"sid=x; Domain=other.test; Path=/"},
+	})
+	wantCode(t, err, "invalid_request")
+	if len(m.List()) != 0 {
+		t.Fatal("rejected import created a session")
+	}
+}

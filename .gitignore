@@ -1,6 +1,7 @@
 /bin/
 /state/
 *.session
+*.session-v2
 master.key
 api.token
 .pending-*

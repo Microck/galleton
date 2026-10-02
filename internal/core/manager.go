@@ -189,9 +189,13 @@ func (m *Manager) Import(id string, in Import) (Metadata, error) {
 			return Metadata{}, err
 		}
 		cookies = append(cookies, parsed...)
-		s.Cookies, _, _, err = updateCookies(nil, u, cookies, now)
+		var accepted int
+		s.Cookies, accepted, _, err = updateCookies(nil, u, cookies, now)
 		if err != nil {
 			return Metadata{}, err
+		}
+		if accepted < len(cookies) {
+			return Metadata{}, invalid("One or more cookies are not valid for cookie_origin.")
 		}
 	}
 	if s.AccessToken == "" && s.RefreshToken == "" && len(s.Cookies) == 0 && len(s.Secrets) == 0 {
