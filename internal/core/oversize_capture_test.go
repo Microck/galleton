@@ -34,3 +34,20 @@ func TestOversizedCapturedStatePersistsBoundedUncertainty(t *testing.T) {
 		t.Fatalf("persisted state exceeds vault limit: %d", len(raw))
 	}
 }
+
+func TestStateSizeCheckReservesCommitTimestampGrowth(t *testing.T) {
+	state := &State{
+		ID: "alice", Provider: "test", Status: "ready", Revision: 1,
+		CreatedAt: time.Unix(0, 0).UTC(), UpdatedAt: time.Unix(0, 0).UTC(),
+		Secrets: map[string]string{"padding": ""},
+	}
+	base, err := json.Marshal(state)
+	if err != nil { t.Fatal(err) }
+	state.Secrets["padding"] = strings.Repeat("x", (1<<20)-len(base))
+	raw, err := json.Marshal(state)
+	if err != nil { t.Fatal(err) }
+	if len(raw) != 1<<20 { t.Fatalf("boundary setup produced %d bytes", len(raw)) }
+	if stateFitsVault(state) {
+		t.Fatal("size check did not reserve maximum UpdatedAt growth")
+	}
+}

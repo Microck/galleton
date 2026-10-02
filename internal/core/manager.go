@@ -76,7 +76,11 @@ func cloneState(s *State) *State {
 	return &n
 }
 func stateFitsVault(s *State) bool {
-	raw, err := json.Marshal(s)
+	probe := cloneState(s)
+	// commit replaces UpdatedAt. Measure with the longest UTC RFC3339Nano form
+	// so a candidate accepted here cannot grow past the vault limit afterward.
+	probe.UpdatedAt = time.Date(2000, 1, 1, 0, 0, 0, 999999999, time.UTC)
+	raw, err := json.Marshal(probe)
 	return err == nil && len(raw) <= 1<<20
 }
 func (m *Manager) get(id string) (*entry, error) {
