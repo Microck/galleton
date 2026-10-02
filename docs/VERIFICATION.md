@@ -1,8 +1,8 @@
 # Verification
 
-## Local publication checks
+## Historical local publication checks
 
-Executed against the renamed source during preparation of the initial GitHub PR:
+This table is a historical snapshot from preparation of the initial GitHub PR, not the current PR test counts. Later PR validation expanded the Node SDK suite to seven tests and the Python SDK suite to ten; current-head CI is the source for the latest results.
 
 | Check | Result |
 |---|---|

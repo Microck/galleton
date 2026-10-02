@@ -363,7 +363,14 @@ func (m *Manager) ensure(e *entry, force bool) error {
 	s := e.state
 	stillValid := s.AccessExpiresAt.IsZero() || now.Before(s.AccessExpiresAt)
 	if s.Status == "retry_wait" && now.Before(s.NextRefresh) {
-		if !force && stillValid {
+		usable := s.AccessToken != "" && stillValid
+		for _, cookie := range s.Cookies {
+			if cookie.Cookie.Expires.IsZero() || now.Before(cookie.Cookie.Expires) {
+				usable = true
+				break
+			}
+		}
+		if !force && usable {
 			return nil
 		}
 		p := problem(503, "retry_later", "Renewal is waiting for its retry deadline.")
