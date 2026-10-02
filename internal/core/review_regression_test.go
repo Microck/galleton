@@ -204,7 +204,9 @@ func TestAmbiguousResourceRequestPausesCredentialReuse(t *testing.T) {
 	}))
 	defer server.Close()
 	m, v, _ := managerFor(t, providerFor(server.URL))
-	importOAuth(t, m)
+	if _, err := m.Import("alice", Import{Provider: "test", AccessToken: "a0", RefreshToken: "r0"}); err != nil {
+		t.Fatal(err)
+	}
 	e, _ := m.get("alice")
 	e.state.NextRefresh = time.Now().Add(time.Hour)
 	_, err := m.Request("alice", RequestInput{URL: server.URL + "/resource"})
@@ -223,7 +225,9 @@ func TestPreConnectionResourceFailureRemainsRetryable(t *testing.T) {
 	rawURL := "http://" + listener.Addr().String()
 	if err := listener.Close(); err != nil { t.Fatal(err) }
 	m, _, _ := managerFor(t, providerFor(rawURL))
-	importOAuth(t, m)
+	if _, err := m.Import("alice", Import{Provider: "test", AccessToken: "a0", RefreshToken: "r0"}); err != nil {
+		t.Fatal(err)
+	}
 	e, _ := m.get("alice")
 	e.state.NextRefresh = time.Now().Add(time.Hour)
 	_, err = m.Request("alice", RequestInput{URL: rawURL + "/resource"})
