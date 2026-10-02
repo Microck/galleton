@@ -275,11 +275,19 @@ func performRefresh(s *State, p *Provider, client *http.Client, req *http.Reques
 	}
 	defer resp.Body.Close()
 	now := time.Now().UTC()
-	cookies, _, retained, cookieErr := updateCookies(s.Cookies, req.URL, resp.Cookies(), now)
-	if cookieErr == nil {
-		s.Cookies = cookies
-	} else {
-		return problem(502, "protocol_error", "The provider returned more cookies than the session limit.")
+	retained := 0
+	if lines := resp.Header.Values("Set-Cookie"); len(lines) > 0 {
+		cookies, cookieErr := parseSetCookies(lines)
+		if cookieErr != nil {
+			return problem(502, "protocol_error", "The provider returned an invalid or unsupported cookie rotation.")
+		}
+		s.Cookies, _, retained, cookieErr = updateCookies(s.Cookies, req.URL, cookies, now)
+		if cookieErr != nil {
+			return problem(502, "protocol_error", "The provider returned more cookies than the session limit.")
+		}
+		if retained == 0 {
+			return problem(502, "protocol_error", "The provider cookie rotation did not retain a usable replacement cookie.")
+		}
 	}
 	raw, readErr := io.ReadAll(io.LimitReader(resp.Body, (1<<20)+1))
 	if readErr != nil || len(raw) > 1<<20 {

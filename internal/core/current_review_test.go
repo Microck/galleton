@@ -223,3 +223,50 @@ func TestStartupRecoveryBoundsTerminalMetadata(t *testing.T) {
 		t.Fatalf("startup recovery did not persist bounded uncertainty: %#v", e.state)
 	}
 }
+
+func TestRejectedExternalCapturePersistsUncertainty(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer server.Close()
+	m, v, _ := managerFor(t, providerFor(server.URL))
+	if _, err := m.Import("alice", Import{
+		Provider: "test", RefreshToken: "r0", CookieOrigin: server.URL, CookieHeader: "sid=old",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_, err := m.Capture("alice", server.URL, []string{"sid=replacement; Secure; Path=/"})
+	wantCode(t, err, "renewal_uncertain")
+	_, err = m.Headers("alice", server.URL)
+	wantCode(t, err, "renewal_uncertain")
+	states, loadErr := v.LoadAll()
+	if loadErr != nil || len(states) != 1 || states[0].Status != "uncertain" {
+		t.Fatalf("rejected external capture was not quarantined: %#v %v", states, loadErr)
+	}
+}
+
+func TestRejectedRenewalCookieRotationIsTerminal(t *testing.T) {
+	for _, setCookie := range []string{"sid=replacement; Secure; Path=/", "not a cookie"} {
+		t.Run(setCookie, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Add("Set-Cookie", setCookie)
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"access_token": "a1", "token_type": "Bearer", "expires_in": 3600,
+				})
+			}))
+			defer server.Close()
+			m, v, _ := managerFor(t, providerFor(server.URL))
+			if _, err := m.Import("alice", Import{
+				Provider: "test", RefreshToken: "r0", CookieOrigin: server.URL, CookieHeader: "sid=old",
+			}); err != nil {
+				t.Fatal(err)
+			}
+			_, err := m.Refresh("alice")
+			wantCode(t, err, "protocol_error")
+			_, err = m.Headers("alice", server.URL)
+			wantCode(t, err, "protocol_error")
+			states, loadErr := v.LoadAll()
+			if loadErr != nil || len(states) != 1 || states[0].Status != "protocol_error" {
+				t.Fatalf("rejected renewal rotation was not terminal: %#v %v", states, loadErr)
+			}
+		})
+	}
+}

@@ -520,8 +520,9 @@ func (m *Manager) Capture(id, rawURL string, lines []string) (Metadata, error) {
 		return Metadata{}, m.cookieCaptureFailure(e)
 	}
 	n := cloneState(e.state)
-	n.Cookies, _, _, err = updateCookies(n.Cookies, u, cookies, time.Now().UTC())
-	if err != nil {
+	var retained int
+	n.Cookies, _, retained, err = updateCookies(n.Cookies, u, cookies, time.Now().UTC())
+	if err != nil || len(lines) > 0 && retained == 0 {
 		return Metadata{}, m.cookieCaptureFailure(e)
 	}
 	n.Revision++
