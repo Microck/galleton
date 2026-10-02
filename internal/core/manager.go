@@ -81,6 +81,12 @@ func stateFitsVault(s *State) bool {
 	// commit replaces UpdatedAt. Measure with the longest UTC RFC3339Nano form
 	// so a candidate accepted here cannot grow past the vault limit afterward.
 	probe.UpdatedAt = time.Date(2000, 1, 1, 0, 0, 0, 999999999, time.UTC)
+	// Reserve room for the pre-send checkpoints written by ensure and Request.
+	probe.PendingRefresh = true
+	probe.PendingRequest = true
+	if len(probe.Status) < len("refreshing") {
+		probe.Status = "refreshing"
+	}
 	raw, err := json.Marshal(probe)
 	return err == nil && len(raw) <= 1<<20
 }
@@ -406,7 +412,6 @@ func (m *Manager) ensure(e *entry, force bool) error {
 	pending.PendingRefresh = true
 	pending.Status = "refreshing"
 	if err = m.vault.Save(pending); err != nil {
-		e.dirty = true
 		return storageProblem()
 	} // No request was sent.
 	e.state = pending

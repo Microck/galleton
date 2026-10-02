@@ -371,3 +371,63 @@ func TestImportRejectsCookieOutsideOrigin(t *testing.T) {
 		t.Fatal("rejected import created a session")
 	}
 }
+
+func TestStateFitsVaultReservesCheckpointSpace(t *testing.T) {
+	const limit = 1 << 20
+	s := &State{
+		ID: "alice", Provider: "test", ConfigHash: "hash", Status: "ready",
+		CreatedAt: time.Now().UTC(), Secrets: map[string]string{"padding": ""},
+	}
+	readySize := func(n int) int {
+		probe := cloneState(s)
+		probe.UpdatedAt = time.Date(2000, 1, 1, 0, 0, 0, 999999999, time.UTC)
+		probe.Secrets["padding"] = strings.Repeat("x", n)
+		raw, err := json.Marshal(probe)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return len(raw)
+	}
+	low, high := 0, limit+1
+	for low+1 < high {
+		mid := low + (high-low)/2
+		if readySize(mid) <= limit {
+			low = mid
+		} else {
+			high = mid
+		}
+	}
+	s.Secrets["padding"] = strings.Repeat("x", low)
+	checkpoint := cloneState(s)
+	checkpoint.UpdatedAt = time.Date(2000, 1, 1, 0, 0, 0, 999999999, time.UTC)
+	checkpoint.PendingRefresh = true
+	checkpoint.PendingRequest = true
+	checkpoint.Status = "refreshing"
+	raw, err := json.Marshal(checkpoint)
+	if err != nil || readySize(low) > limit || len(raw) <= limit {
+		t.Fatalf("invalid boundary fixture: ready=%d checkpoint=%d err=%v", readySize(low), len(raw), err)
+	}
+	if stateFitsVault(s) {
+		t.Fatal("state accepted without room for its pre-send checkpoint")
+	}
+}
+
+func TestFailedCheckpointDoesNotMarkCleanStateDirty(t *testing.T) {
+	m, v, _ := managerFor(t, providerFor("http://127.0.0.1:11111"))
+	importOAuth(t, m)
+	v.saveHook = func(s *State) error {
+		if s.PendingRefresh {
+			return fmt.Errorf("checkpoint fault")
+		}
+		return nil
+	}
+	_, err := m.Refresh("alice")
+	wantCode(t, err, "storage_failure")
+	e, getErr := m.get("alice")
+	if getErr != nil {
+		t.Fatal(getErr)
+	}
+	if e.dirty {
+		t.Fatal("failed pre-send checkpoint marked unchanged state dirty")
+	}
+}
