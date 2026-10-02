@@ -75,6 +75,10 @@ func cloneState(s *State) *State {
 	}
 	return &n
 }
+func stateFitsVault(s *State) bool {
+	raw, err := json.Marshal(s)
+	return err == nil && len(raw) <= 1<<20
+}
 func (m *Manager) get(id string) (*entry, error) {
 	if err := checkID(id); err != nil {
 		return nil, err
@@ -502,6 +506,9 @@ func (m *Manager) Capture(id, rawURL string, lines []string) (Metadata, error) {
 	if candidate := nextRefresh(n, p, time.Now().UTC()); candidate.Before(n.NextRefresh) {
 		n.NextRefresh = candidate
 	}
+	if !stateFitsVault(n) {
+		return Metadata{}, m.cookieCaptureFailure(e)
+	}
 	if err = m.commit(e, n); err != nil {
 		return Metadata{}, err
 	}
@@ -615,6 +622,9 @@ func (m *Manager) Request(id string, in RequestInput) (RequestResult, error) {
 		if candidate := nextRefresh(n, p, time.Now().UTC()); candidate.Before(n.NextRefresh) {
 			n.NextRefresh = candidate
 		}
+		if !stateFitsVault(n) {
+			return RequestResult{}, m.cookieCaptureFailure(e)
+		}
 	}
 	if err = m.commit(e, n); err != nil {
 		return RequestResult{}, err
@@ -719,6 +729,16 @@ func (m *Manager) cookieCaptureFailure(e *entry) error {
 	n.Status = "uncertain"
 	n.LastError = problem(409, "renewal_uncertain", "Cookie capture failed after a resource response; automatic credential reuse is paused.")
 	n.Revision++
+	if !stateFitsVault(n) {
+		// The previous state was durable, but adding terminal metadata can cross
+		// the limit. Drop credentials rather than leave a reusable disk copy.
+		n.AccessToken = ""
+		n.RefreshToken = ""
+		n.AccessExpiresAt = time.Time{}
+		n.Secrets = map[string]string{}
+		n.Cookies = nil
+		n.NextRefresh = time.Time{}
+	}
 	if err := m.commit(e, n); err != nil {
 		return err
 	}
