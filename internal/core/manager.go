@@ -9,6 +9,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/http/httptrace"
 	"sort"
 	"strings"
 	"sync"
@@ -138,7 +139,7 @@ func (m *Manager) Import(id string, in Import) (Metadata, error) {
 		return Metadata{}, invalid("An OAuth refresh_token is required; an access token alone is not renewable.")
 	}
 	now := time.Now().UTC()
-	s := &State{ID: id, Provider: p.Name, ConfigHash: p.hash, Status: "ready", Revision: 1, CreatedAt: now, UpdatedAt: now, NextRefresh: now, AccessToken: in.AccessToken, RefreshToken: in.RefreshToken, AccessExpiresAt: in.AccessExpiresAt, Secrets: map[string]string{}}
+	s := &State{ID: id, Provider: p.Name, ConfigHash: p.hash, Status: "ready", CreatedAt: now, UpdatedAt: now, NextRefresh: now, AccessToken: in.AccessToken, RefreshToken: in.RefreshToken, AccessExpiresAt: in.AccessExpiresAt, Secrets: map[string]string{}}
 	for k, v := range in.Secrets {
 		if checkID(k) != nil || len(v) > 64<<10 {
 			return Metadata{}, invalid("Invalid secret name or size.")
@@ -196,7 +197,11 @@ func (m *Manager) Import(id string, in Import) (Metadata, error) {
 		if m.stopping.Load() {
 			return Metadata{}, problem(503, "shutting_down", "The daemon is shutting down.")
 		}
-		s.Revision = old.state.Revision + 1
+		revision, err := m.vault.nextRevision(old.state.Revision)
+		if err != nil {
+			return Metadata{}, storageProblem()
+		}
+		s.Revision = revision
 		if err := m.commit(old, s); err != nil {
 			return Metadata{}, err
 		}
@@ -214,6 +219,12 @@ func (m *Manager) Import(id string, in Import) (Metadata, error) {
 		m.mu.Unlock()
 		return Metadata{}, invalid("The local session limit was reached.")
 	}
+	revision, err := m.vault.nextRevision(0)
+	if err != nil {
+		m.mu.Unlock()
+		return Metadata{}, storageProblem()
+	}
+	s.Revision = revision
 	e := &entry{state: s}
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -565,8 +576,15 @@ func (m *Manager) Request(id string, in RequestInput) (RequestResult, error) {
 	}
 	req.GetBody = nil
 	req.Header = headers
+	var connected atomic.Bool
+	req = req.WithContext(httptrace.WithClientTrace(req.Context(), &httptrace.ClientTrace{
+		GotConn: func(httptrace.GotConnInfo) { connected.Store(true) },
+	}))
 	resp, err := m.upstream.Do(req)
 	if err != nil {
+		if connected.Load() {
+			return RequestResult{}, m.resourceRequestFailure(e)
+		}
 		return RequestResult{}, problem(502, "upstream_request_failed", "The upstream response was not received. The resource request was not retried; its side effects may be unknown.")
 	}
 	defer resp.Body.Close()
@@ -679,6 +697,15 @@ func (m *Manager) cookieCaptureFailure(e *entry) error {
 	n := cloneState(e.state)
 	n.Status = "uncertain"
 	n.LastError = problem(409, "renewal_uncertain", "Cookie capture failed after a resource response; automatic credential reuse is paused.")
+	n.Revision++
+	if err := m.commit(e, n); err != nil { return err }
+	return n.LastError
+}
+
+func (m *Manager) resourceRequestFailure(e *entry) error {
+	n := cloneState(e.state)
+	n.Status = "uncertain"
+	n.LastError = problem(409, "renewal_uncertain", "The upstream connection closed before a resource response was received; automatic credential reuse is paused.")
 	n.Revision++
 	if err := m.commit(e, n); err != nil { return err }
 	return n.LastError

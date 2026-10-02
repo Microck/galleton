@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -193,4 +194,69 @@ func TestAbsentTimestampsOmittedAndPresentValuesRoundTrip(t *testing.T) {
 func TestUpstreamHeaderWaitUsesRequestContext(t *testing.T) {
 	transport := newUpstreamClient().Transport.(*http.Transport)
 	if transport.ResponseHeaderTimeout != 0 { t.Fatal("shared transport overrides provider context timeout") }
+}
+
+func TestAmbiguousResourceRequestPausesCredentialReuse(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, _, err := w.(http.Hijacker).Hijack()
+		if err != nil { t.Error(err); return }
+		_ = conn.Close()
+	}))
+	defer server.Close()
+	m, v, _ := managerFor(t, providerFor(server.URL))
+	importOAuth(t, m)
+	e, _ := m.get("alice")
+	e.state.NextRefresh = time.Now().Add(time.Hour)
+	_, err := m.Request("alice", RequestInput{URL: server.URL + "/resource"})
+	wantCode(t, err, "renewal_uncertain")
+	_, err = m.Headers("alice", server.URL)
+	wantCode(t, err, "renewal_uncertain")
+	states, err := v.LoadAll()
+	if err != nil || len(states) != 1 || states[0].Status != "uncertain" {
+		t.Fatalf("ambiguous resource failure was not persisted: %v", err)
+	}
+}
+
+func TestPreConnectionResourceFailureRemainsRetryable(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil { t.Fatal(err) }
+	rawURL := "http://" + listener.Addr().String()
+	if err := listener.Close(); err != nil { t.Fatal(err) }
+	m, _, _ := managerFor(t, providerFor(rawURL))
+	importOAuth(t, m)
+	e, _ := m.get("alice")
+	e.state.NextRefresh = time.Now().Add(time.Hour)
+	_, err = m.Request("alice", RequestInput{URL: rawURL + "/resource"})
+	wantCode(t, err, "upstream_request_failed")
+	meta, err := m.Status("alice")
+	if err != nil || meta.Status != "ready" {
+		t.Fatalf("safe dial failure changed session state: %#v %v", meta, err)
+	}
+}
+
+func TestRevisionWatermarkSurvivesForgetAndRestart(t *testing.T) {
+	m, v, dir := managerFor(t, providerFor("http://127.0.0.1:9999"))
+	first, err := m.Import("alice", Import{Provider: "test", RefreshToken: "r0"})
+	if err != nil { t.Fatal(err) }
+	delayed := first.Revision
+	if err := m.Forget("alice"); err != nil { t.Fatal(err) }
+	ahead := uint64(time.Now().Add(time.Hour).UnixMilli())
+	if err := v.recordRevision(ahead); err != nil { t.Fatal(err) }
+	if err := v.Close(); err != nil { t.Fatal(err) }
+	reopened, err := OpenVault(dir)
+	if err != nil { t.Fatal(err) }
+	defer reopened.Close()
+	m2, err := NewManager(reopened, Config{Providers: []Provider{providerFor("http://127.0.0.1:9999")}})
+	if err != nil { t.Fatal(err) }
+	fresh, err := m2.Import("alice", Import{Provider: "test", RefreshToken: "fresh"})
+	if err != nil { t.Fatal(err) }
+	if fresh.Revision <= ahead || fresh.Revision > maxRevision {
+		t.Fatalf("revision %d did not advance durable watermark %d", fresh.Revision, ahead)
+	}
+	_, err = m2.Import("alice", Import{
+		Provider: "test", RefreshToken: "delayed", Replace: true, ExpectedRevision: &delayed,
+	})
+	wantCode(t, err, "revision_conflict")
+	e, _ := m2.get("alice")
+	if e.state.RefreshToken != "fresh" { t.Fatal("delayed replacement overwrote reimport") }
 }

@@ -13,15 +13,23 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
+	"time"
 )
+
+const maxRevision = uint64(1<<53 - 1)
+const revisionWatermarkFile = ".revision-watermark"
 
 // Vault owns an exclusive OS file lock. It is a single-host store, not a
 // distributed database. Keys and credentials never appear in log messages.
 type Vault struct {
-	dir  string
-	aead cipher.AEAD
-	lock *os.File
+	dir        string
+	aead       cipher.AEAD
+	lock       *os.File
+	revisionMu sync.Mutex
+	revision   uint64
 	// saveHook is a test-only fault injection point, before replacing the file.
 	saveHook func(*State) error
 }
@@ -181,7 +189,11 @@ func OpenVault(dir string) (*Vault, error) {
 	if err != nil {
 		return fail(err)
 	}
-	return &Vault{dir: dir, aead: aead, lock: lock}, nil
+	revision, err := loadRevisionWatermark(dir)
+	if err != nil {
+		return fail(err)
+	}
+	return &Vault{dir: dir, aead: aead, lock: lock, revision: revision}, nil
 }
 func (v *Vault) Close() error {
 	if v.lock == nil {
@@ -199,6 +211,9 @@ func (v *Vault) Save(s *State) error {
 		if err := v.saveHook(s); err != nil {
 			return err
 		}
+	}
+	if err := v.recordRevision(s.Revision); err != nil {
+		return err
 	}
 	raw, err := json.Marshal(s)
 	if err != nil {
@@ -218,6 +233,66 @@ func (v *Vault) Save(s *State) error {
 	return atomicWrite(filepath.Join(v.dir, sessionFilename(s.ID)), blob)
 }
 
+func loadRevisionWatermark(dir string) (uint64, error) {
+	b, err := safeRead(filepath.Join(dir, revisionWatermarkFile), 64)
+	if os.IsNotExist(err) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	revision, err := strconv.ParseUint(strings.TrimSpace(string(b)), 10, 64)
+	if err != nil || revision > maxRevision {
+		return 0, errors.New("invalid revision watermark")
+	}
+	return revision, nil
+}
+
+func (v *Vault) writeRevisionLocked(revision uint64) error {
+	if revision > maxRevision {
+		return errors.New("revision limit reached")
+	}
+	if err := atomicWrite(filepath.Join(v.dir, revisionWatermarkFile), []byte(strconv.FormatUint(revision, 10)+"\n")); err != nil {
+		return err
+	}
+	v.revision = revision
+	return nil
+}
+
+func (v *Vault) recordRevision(revision uint64) error {
+	if revision == 0 {
+		return nil
+	}
+	v.revisionMu.Lock()
+	defer v.revisionMu.Unlock()
+	if revision <= v.revision {
+		return nil
+	}
+	return v.writeRevisionLocked(revision)
+}
+
+func (v *Vault) nextRevision(after uint64) (uint64, error) {
+	v.revisionMu.Lock()
+	defer v.revisionMu.Unlock()
+	if after >= maxRevision || v.revision >= maxRevision {
+		return 0, errors.New("revision limit reached")
+	}
+	revision := uint64(time.Now().UnixMilli())
+	if revision <= after {
+		revision = after + 1
+	}
+	if revision <= v.revision {
+		revision = v.revision + 1
+	}
+	if revision > maxRevision {
+		return 0, errors.New("revision limit reached")
+	}
+	if err := v.writeRevisionLocked(revision); err != nil {
+		return 0, err
+	}
+	return revision, nil
+}
+
 func sessionFilename(id string) string {
 	return "s-" + hex.EncodeToString([]byte(id)) + ".session-v2"
 }
@@ -228,6 +303,7 @@ func (v *Vault) LoadAll() ([]*State, error) {
 		return nil, err
 	}
 	out := []*State{}
+	var loadedRevision uint64
 	current := map[string]bool{}
 	for _, f := range entries {
 		if strings.HasSuffix(f.Name(), ".session-v2") {
@@ -276,10 +352,16 @@ func (v *Vault) LoadAll() ([]*State, error) {
 		}
 		if !isLegacy || !current[id] {
 			out = append(out, &s)
+			if s.Revision > loadedRevision {
+				loadedRevision = s.Revision
+			}
 		}
 		if len(out) > 1024 {
 			return nil, errors.New("too many sessions")
 		}
+	}
+	if err := v.recordRevision(loadedRevision); err != nil {
+		return nil, err
 	}
 	// New-format entries are authoritative after an interrupted migration.
 	// Validate every ciphertext before changing any legacy file.

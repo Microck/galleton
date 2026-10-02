@@ -17,7 +17,17 @@ foreach ($Path in @($Binary, $StateDir, $Config)) {
     }
 }
 $User = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
-$Arguments = 'serve --dir "{0}" --config "{1}"' -f $StateDir.TrimEnd('\'), $Config
+function Quote-WindowsArgument([string]$Value) {
+    # Backslashes immediately before the closing quote must be doubled for
+    # CommandLineToArgvW. This also preserves drive roots such as C:\.
+    $TrailingBackslashes = ([regex]::Match($Value, '\\+$')).Value.Length
+    $EscapedValue = $Value
+    if ($TrailingBackslashes -gt 0) {
+        $EscapedValue += '\' * $TrailingBackslashes
+    }
+    return '"' + $EscapedValue + '"'
+}
+$Arguments = 'serve --dir {0} --config {1}' -f (Quote-WindowsArgument $StateDir), (Quote-WindowsArgument $Config)
 $Action = New-ScheduledTaskAction -Execute $Binary -Argument $Arguments
 $Trigger = New-ScheduledTaskTrigger -AtLogOn -User $User
 $Principal = New-ScheduledTaskPrincipal -UserId $User -LogonType Interactive -RunLevel Limited
