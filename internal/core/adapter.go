@@ -278,14 +278,9 @@ func performRefresh(s *State, p *Provider, client *http.Client, req *http.Reques
 	retained := 0
 	var cookieProblem *Problem
 	if lines := resp.Header.Values("Set-Cookie"); len(lines) > 0 {
-		cookies := make([]*http.Cookie, 0, len(lines))
-		for _, line := range lines {
-			parsed, parseErr := parseSetCookies([]string{line})
-			if parseErr != nil {
-				cookieProblem = problem(502, "protocol_error", "The provider returned an invalid or unsupported cookie rotation.")
-				continue
-			}
-			cookies = append(cookies, parsed...)
+		cookies, rejected := parseSetCookiesPartial(lines)
+		if rejected {
+			cookieProblem = problem(502, "protocol_error", "The provider returned an invalid or unsupported cookie rotation.")
 		}
 		if len(cookies) > 0 {
 			var updated []StoredCookie

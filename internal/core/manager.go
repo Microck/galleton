@@ -515,15 +515,17 @@ func (m *Manager) Capture(id, rawURL string, lines []string) (Metadata, error) {
 	if err != nil {
 		return Metadata{}, err
 	}
-	cookies, err := parseSetCookies(lines)
+	cookies, rejected := parseSetCookiesPartial(lines)
+	n := cloneState(e.state)
+	accepted := 0
+	if len(cookies) > 0 {
+		n.Cookies, accepted, _, err = updateCookies(n.Cookies, u, cookies, time.Now().UTC())
+	}
 	if err != nil {
 		return Metadata{}, m.cookieCaptureFailure(e)
 	}
-	n := cloneState(e.state)
-	var retained int
-	n.Cookies, _, retained, err = updateCookies(n.Cookies, u, cookies, time.Now().UTC())
-	if err != nil || len(lines) > 0 && retained == 0 {
-		return Metadata{}, m.cookieCaptureFailure(e)
+	if rejected || accepted < len(cookies) {
+		return Metadata{}, m.cookieCaptureFailureFrom(e, n)
 	}
 	n.Revision++
 	if candidate := nextRefresh(n, p, time.Now().UTC()); candidate.Before(n.NextRefresh) {
@@ -637,14 +639,16 @@ func (m *Manager) Request(id string, in RequestInput) (RequestResult, error) {
 	n := cloneState(e.state)
 	n.PendingRequest = false
 	if lines := resp.Header.Values("Set-Cookie"); len(lines) > 0 {
-		cookies, parseErr := parseSetCookies(lines)
-		if parseErr != nil {
+		cookies, rejected := parseSetCookiesPartial(lines)
+		accepted := 0
+		if len(cookies) > 0 {
+			n.Cookies, accepted, _, err = updateCookies(n.Cookies, u, cookies, time.Now().UTC())
+		}
+		if err != nil {
 			return RequestResult{}, m.cookieCaptureFailure(e)
 		}
-		var retained int
-		n.Cookies, _, retained, err = updateCookies(n.Cookies, u, cookies, time.Now().UTC())
-		if err != nil || retained == 0 {
-			return RequestResult{}, m.cookieCaptureFailure(e)
+		if rejected || accepted < len(cookies) {
+			return RequestResult{}, m.cookieCaptureFailureFrom(e, n)
 		}
 		n.Revision++
 		if candidate := nextRefresh(n, p, time.Now().UTC()); candidate.Before(n.NextRefresh) {
@@ -752,11 +756,22 @@ func (m *Manager) FlushAll() error {
 }
 
 func (m *Manager) cookieCaptureFailure(e *entry) error {
-	return m.boundedUncertain(e, "Cookie capture failed after a resource response; automatic credential reuse is paused.")
+	return m.cookieCaptureFailureFrom(e, nil)
+}
+
+func (m *Manager) cookieCaptureFailureFrom(e *entry, candidate *State) error {
+	if candidate == nil {
+		candidate = e.state
+	}
+	return m.boundedUncertainFrom(e, candidate, "Cookie capture failed after a resource response; automatic credential reuse is paused.")
 }
 
 func (m *Manager) boundedUncertain(e *entry, message string) error {
-	n := cloneState(e.state)
+	return m.boundedUncertainFrom(e, e.state, message)
+}
+
+func (m *Manager) boundedUncertainFrom(e *entry, candidate *State, message string) error {
+	n := cloneState(candidate)
 	n.PendingRequest = false
 	n.PendingRefresh = false
 	n.Status = "uncertain"

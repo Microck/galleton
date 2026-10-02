@@ -35,15 +35,27 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, `{"ok":true}`) })
 	mux.HandleFunc("/oauth/token", func(w http.ResponseWriter, r *http.Request) {
-		mu.Lock()
-		defer mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		if r.Method != "POST" {
 			w.WriteHeader(405)
 			return
 		}
-		_ = r.ParseForm()
-		if r.Form.Get("grant_type") != "refresh_token" || r.Form.Get("refresh_token") != refresh || time.Now().After(refreshExpiry) {
+		r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
+		controller := http.NewResponseController(w)
+		if err := controller.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+			w.WriteHeader(500)
+			return
+		}
+		defer controller.SetReadDeadline(time.Time{})
+		if err := r.ParseForm(); err != nil {
+			w.WriteHeader(400)
+			fmt.Fprint(w, `{"error":"invalid_request"}`)
+			return
+		}
+		grantType, presented := r.Form.Get("grant_type"), r.Form.Get("refresh_token")
+		mu.Lock()
+		defer mu.Unlock()
+		if grantType != "refresh_token" || presented != refresh || time.Now().After(refreshExpiry) {
 			w.WriteHeader(400)
 			fmt.Fprint(w, `{"error":"invalid_grant"}`)
 			return
@@ -96,7 +108,7 @@ func main() {
 		json.NewEncoder(w).Encode(map[string]any{"ok": true, "auth": kind, "oauth_renewals": oauthN, "cookie_renewals": cookieN})
 	})
 	fmt.Fprintln(os.Stderr, "Disposable demo provider listening on", *listen)
-	srv := http.Server{Addr: *listen, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+	srv := http.Server{Addr: *listen, Handler: mux, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 5 * time.Second}
 	if err := srv.ListenAndServe(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)

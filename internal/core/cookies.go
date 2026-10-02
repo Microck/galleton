@@ -131,3 +131,20 @@ func parseSetCookies(lines []string) ([]*http.Cookie, error) {
 	}
 	return out, nil
 }
+
+func parseSetCookiesPartial(lines []string) ([]*http.Cookie, bool) {
+	if len(lines) > 256 {
+		return nil, true
+	}
+	out := make([]*http.Cookie, 0, len(lines))
+	rejected := false
+	for _, line := range lines {
+		c, err := http.ParseSetCookie(line)
+		if err != nil || c.Partitioned {
+			rejected = true
+			continue
+		}
+		out = append(out, c)
+	}
+	return out, rejected
+}

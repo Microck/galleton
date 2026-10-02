@@ -309,3 +309,49 @@ func TestCookieDeletionCanAccompanyValidTokenRenewal(t *testing.T) {
 		t.Fatalf("valid token renewal with deletion was rejected: %#v %v", states, err)
 	}
 }
+
+func TestCookieDeletionIsAcceptedByCaptureAndManagedRequest(t *testing.T) {
+	t.Run("capture", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+		defer server.Close()
+		m, v, _ := managerFor(t, providerFor(server.URL))
+		if _, err := m.Import("alice", Import{
+			Provider: "test", AccessToken: "a0", RefreshToken: "r0",
+			CookieOrigin: server.URL, CookieHeader: "sid=old",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := m.Capture("alice", server.URL, []string{"sid=; Max-Age=0; Path=/"}); err != nil {
+			t.Fatal(err)
+		}
+		states, err := v.LoadAll()
+		if err != nil || len(states) != 1 || states[0].Status != "ready" || len(states[0].Cookies) != 0 {
+			t.Fatalf("capture deletion was not accepted: %#v %v", states, err)
+		}
+	})
+
+	t.Run("managed request", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.SetCookie(w, &http.Cookie{Name: "sid", Value: "", Path: "/", MaxAge: -1})
+			_, _ = fmt.Fprint(w, "ok")
+		}))
+		defer server.Close()
+		m, v, _ := managerFor(t, providerFor(server.URL))
+		if _, err := m.Import("alice", Import{
+			Provider: "test", AccessToken: "a0", RefreshToken: "r0",
+			CookieOrigin: server.URL, CookieHeader: "sid=old",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		e, _ := m.get("alice")
+		e.state.NextRefresh = time.Now().Add(time.Hour)
+		result, err := m.Request("alice", RequestInput{URL: server.URL})
+		if err != nil || result.Status != http.StatusOK {
+			t.Fatalf("managed deletion failed: %#v %v", result, err)
+		}
+		states, loadErr := v.LoadAll()
+		if loadErr != nil || len(states) != 1 || states[0].Status != "ready" || len(states[0].Cookies) != 0 {
+			t.Fatalf("managed deletion was not accepted: %#v %v", states, loadErr)
+		}
+	})
+}
