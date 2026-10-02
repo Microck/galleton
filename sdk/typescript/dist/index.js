@@ -40,6 +40,31 @@ function sessionPath(id) {
         throw new TypeError("Invalid session ID");
     return `/v1/sessions/${id}`;
 }
+async function responseText(response) {
+    const reader = response.body?.getReader();
+    if (!reader)
+        return "";
+    const decoder = new TextDecoder();
+    let size = 0;
+    let text = "";
+    try {
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done)
+                break;
+            size += value.byteLength;
+            if (size > 8 * 1024 * 1024) {
+                await reader.cancel().catch(() => { });
+                throw new GalletonError("invalid_response", "Oversized daemon response.", response.status);
+            }
+            text += decoder.decode(value, { stream: true });
+        }
+        return text + decoder.decode();
+    }
+    finally {
+        reader.releaseLock();
+    }
+}
 export class Galleton {
     base;
     token;
@@ -76,13 +101,13 @@ export class Galleton {
         }
         let text;
         try {
-            text = await response.text();
+            text = await responseText(response);
         }
-        catch {
+        catch (error) {
+            if (error instanceof GalletonError)
+                throw error;
             throw new GalletonError("daemon_unavailable", "Galleton response was interrupted; the request may already have completed.", response.status);
         }
-        if (text.length > 8 * 1024 * 1024)
-            throw new GalletonError("invalid_response", "Oversized daemon response.");
         let decoded;
         try {
             decoded = JSON.parse(text);

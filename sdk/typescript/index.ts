@@ -52,6 +52,28 @@ function sessionPath(id: string): string {
   if (!/^[A-Za-z0-9_-]{1,64}$/.test(id)) throw new TypeError("Invalid session ID");
   return `/v1/sessions/${id}`;
 }
+async function responseText(response: Response): Promise<string> {
+  const reader = response.body?.getReader();
+  if (!reader) return "";
+  const decoder = new TextDecoder();
+  let size = 0;
+  let text = "";
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > 8 * 1024 * 1024) {
+        await reader.cancel().catch(() => {});
+        throw new GalletonError("invalid_response", "Oversized daemon response.", response.status);
+      }
+      text += decoder.decode(value, { stream: true });
+    }
+    return text + decoder.decode();
+  } finally {
+    reader.releaseLock();
+  }
+}
 export class Galleton {
   private readonly base: string;
   private readonly token: string;
@@ -84,9 +106,11 @@ export class Galleton {
       throw new GalletonError("daemon_unavailable", "Galleton is unavailable or the local request timed out.");
     }
     let text: string;
-    try { text = await response.text(); }
-    catch { throw new GalletonError("daemon_unavailable", "Galleton response was interrupted; the request may already have completed.", response.status); }
-    if (text.length > 8 * 1024 * 1024) throw new GalletonError("invalid_response", "Oversized daemon response.");
+    try { text = await responseText(response); }
+    catch (error) {
+      if (error instanceof GalletonError) throw error;
+      throw new GalletonError("daemon_unavailable", "Galleton response was interrupted; the request may already have completed.", response.status);
+    }
     let decoded: unknown;
     try { decoded = JSON.parse(text); }
     catch { throw new GalletonError("invalid_response", "Expected a JSON daemon response.", response.status); }

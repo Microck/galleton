@@ -28,7 +28,7 @@ test("body-read failures preserve status and uncertain completion", async () => 
   const originalFetch = globalThis.fetch;
   try {
     for (const failure of [new TypeError("broken stream"), new DOMException("timeout", "AbortError")]) {
-      globalThis.fetch = async () => ({status: 200, text: async () => { throw failure; }});
+      globalThis.fetch = async () => new Response(new ReadableStream({ start(controller) { controller.error(failure); } }), {status: 200});
       await assert.rejects(new Galleton({token: "local"}).refresh("account"), error => {
         assert.ok(error instanceof GalletonError);
         assert.equal(error.code, "daemon_unavailable");
@@ -37,5 +37,25 @@ test("body-read failures preserve status and uncertain completion", async () => 
         return true;
       });
     }
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test("response limit stops buffering while the stream is being read", async () => {
+  const originalFetch = globalThis.fetch;
+  let cancelled = false;
+  let chunks = 0;
+  try {
+    globalThis.fetch = async () => new Response(new ReadableStream({
+      pull(controller) { chunks++; controller.enqueue(new Uint8Array(1024 * 1024)); },
+      cancel() { cancelled = true; },
+    }), {status: 200});
+    await assert.rejects(new Galleton({token: "local"}).status("account"), error => {
+      assert.ok(error instanceof GalletonError);
+      assert.equal(error.code, "invalid_response");
+      assert.equal(error.status, 200);
+      return true;
+    });
+    assert.equal(cancelled, true);
+    assert.ok(chunks <= 10);
   } finally { globalThis.fetch = originalFetch; }
 });
