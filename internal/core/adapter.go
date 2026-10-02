@@ -276,17 +276,22 @@ func performRefresh(s *State, p *Provider, client *http.Client, req *http.Reques
 	defer resp.Body.Close()
 	now := time.Now().UTC()
 	retained := 0
+	var cookieProblem *Problem
 	if lines := resp.Header.Values("Set-Cookie"); len(lines) > 0 {
 		cookies, cookieErr := parseSetCookies(lines)
 		if cookieErr != nil {
-			return problem(502, "protocol_error", "The provider returned an invalid or unsupported cookie rotation.")
-		}
-		s.Cookies, _, retained, cookieErr = updateCookies(s.Cookies, req.URL, cookies, now)
-		if cookieErr != nil {
-			return problem(502, "protocol_error", "The provider returned more cookies than the session limit.")
-		}
-		if retained == 0 {
-			return problem(502, "protocol_error", "The provider cookie rotation did not retain a usable replacement cookie.")
+			cookieProblem = problem(502, "protocol_error", "The provider returned an invalid or unsupported cookie rotation.")
+		} else {
+			var updated []StoredCookie
+			updated, _, retained, cookieErr = updateCookies(s.Cookies, req.URL, cookies, now)
+			if cookieErr != nil {
+				cookieProblem = problem(502, "protocol_error", "The provider returned more cookies than the session limit.")
+			} else {
+				s.Cookies = updated
+				if retained == 0 {
+					cookieProblem = problem(502, "protocol_error", "The provider cookie rotation did not retain a usable replacement cookie.")
+				}
+			}
 		}
 	}
 	raw, readErr := io.ReadAll(io.LimitReader(resp.Body, (1<<20)+1))
@@ -374,6 +379,11 @@ func performRefresh(s *State, p *Provider, client *http.Client, req *http.Reques
 		if !success {
 			return problem(502, "protocol_error", "The adapter's success check did not pass.")
 		}
+	}
+	// Preserve any valid rotated response fields before making a cookie
+	// protocol error terminal; an old refresh token may already be consumed.
+	if cookieProblem != nil {
+		return cookieProblem
 	}
 	if mapping.RequireSetCookie && retained == 0 {
 		return problem(502, "protocol_error", "The adapter requires a valid Set-Cookie renewal response.")

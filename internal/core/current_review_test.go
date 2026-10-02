@@ -249,7 +249,8 @@ func TestRejectedRenewalCookieRotationIsTerminal(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Add("Set-Cookie", setCookie)
 				_ = json.NewEncoder(w).Encode(map[string]any{
-					"access_token": "a1", "token_type": "Bearer", "expires_in": 3600,
+					"access_token": "a1", "refresh_token": "r1",
+					"token_type": "Bearer", "expires_in": 3600,
 				})
 			}))
 			defer server.Close()
@@ -264,7 +265,7 @@ func TestRejectedRenewalCookieRotationIsTerminal(t *testing.T) {
 			_, err = m.Headers("alice", server.URL)
 			wantCode(t, err, "protocol_error")
 			states, loadErr := v.LoadAll()
-			if loadErr != nil || len(states) != 1 || states[0].Status != "protocol_error" {
+			if loadErr != nil || len(states) != 1 || states[0].Status != "protocol_error" || states[0].RefreshToken != "r1" {
 				t.Fatalf("rejected renewal rotation was not terminal: %#v %v", states, loadErr)
 			}
 		})
