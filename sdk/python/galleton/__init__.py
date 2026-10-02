@@ -6,6 +6,7 @@ import ipaddress
 import json
 import re
 from dataclasses import dataclass
+from http.client import HTTPException
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 from urllib.error import HTTPError, URLError
@@ -82,11 +83,18 @@ class Galleton:
             response = self._opener.open(req, timeout=self._timeout)
         except HTTPError as exc:
             response = exc
-        except (URLError, TimeoutError, OSError) as exc:
+        except (HTTPException, URLError, TimeoutError, OSError):
             raise GalletonError("daemon_unavailable", "Galleton is unavailable or the request timed out.") from None
-        with response:
-            status = response.code
-            raw = response.read(8 * 1024 * 1024 + 1)
+        status = response.code
+        try:
+            with response:
+                raw = response.read(8 * 1024 * 1024 + 1)
+        except (HTTPException, URLError, TimeoutError, OSError):
+            raise GalletonError(
+                "daemon_unavailable",
+                "Galleton response was interrupted; the request may already have completed.",
+                status,
+            ) from None
         if len(raw) > 8 * 1024 * 1024:
             raise GalletonError("invalid_response", "Oversized daemon response.", status)
         try:
