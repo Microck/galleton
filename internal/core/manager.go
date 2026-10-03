@@ -675,7 +675,7 @@ func (m *Manager) Request(id string, in RequestInput) (RequestResult, error) {
 		}
 	}
 	if err = m.commit(e, n); err != nil {
-		return RequestResult{}, err
+		return RequestResult{}, problem(503, "storage_failure", "The upstream request was sent and a response was received, but credential persistence failed; do not retry the request automatically.")
 	}
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, (4<<20)+1))
 	if err != nil {

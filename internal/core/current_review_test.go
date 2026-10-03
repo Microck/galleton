@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -429,5 +430,36 @@ func TestFailedCheckpointDoesNotMarkCleanStateDirty(t *testing.T) {
 	}
 	if e.dirty {
 		t.Fatal("failed pre-send checkpoint marked unchanged state dirty")
+	}
+}
+
+func TestPostResponseSaveFailureWarnsAgainstRetry(t *testing.T) {
+	var hits atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		_, _ = fmt.Fprint(w, "ok")
+	}))
+	defer server.Close()
+	m, v, _ := managerFor(t, providerFor(server.URL))
+	importOAuth(t, m)
+	e, err := m.get("alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.state.NextRefresh = time.Now().Add(time.Hour)
+	v.saveHook = func(s *State) error {
+		if !s.PendingRequest {
+			return fmt.Errorf("post-response save fault")
+		}
+		return nil
+	}
+	_, err = m.Request("alice", RequestInput{URL: server.URL, Method: "POST", BodyBase64: "e30="})
+	wantCode(t, err, "storage_failure")
+	p := AsProblem(err)
+	if !strings.Contains(p.Message, "request was sent") || !strings.Contains(p.Message, "do not retry") {
+		t.Fatalf("post-response storage failure is ambiguous: %q", p.Message)
+	}
+	if hits.Load() != 1 {
+		t.Fatalf("upstream hit count = %d, want 1", hits.Load())
 	}
 }
