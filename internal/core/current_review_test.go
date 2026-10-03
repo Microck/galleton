@@ -556,3 +556,25 @@ func TestRetryWaitCookieCapturePreservesDeadline(t *testing.T) {
 		})
 	}
 }
+
+func TestListDoesNotBlockOnBusySession(t *testing.T) {
+	m, _, _ := managerFor(t, providerFor("http://127.0.0.1:11111"))
+	importOAuth(t, m)
+	e, err := m.get("alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	done := make(chan []Metadata, 1)
+	go func() { done <- m.List() }()
+	select {
+	case got := <-done:
+		if len(got) != 1 || got[0].ID != "alice" {
+			t.Fatalf("unexpected snapshot: %#v", got)
+		}
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("List blocked on a busy session")
+	}
+}

@@ -23,6 +23,7 @@ type entry struct {
 	dirty     bool // A rotated credential is in memory but not durably acknowledged.
 	deleted   bool
 	completed time.Time
+	snapshot  atomic.Pointer[Metadata]
 }
 type Manager struct {
 	mu        sync.RWMutex
@@ -63,7 +64,9 @@ func NewManager(v *Vault, c Config) (*Manager, error) {
 				return nil, err
 			}
 		}
-		m.entries[s.ID] = &entry{state: s}
+		e := &entry{state: s}
+		e.publish()
+		m.entries[s.ID] = e
 	}
 	return m, nil
 }
@@ -117,10 +120,12 @@ func (m *Manager) commit(e *entry, next *State) error {
 	next.UpdatedAt = time.Now().UTC()
 	e.state = next
 	e.dirty = true
+	e.publish()
 	if err := m.vault.Save(next); err != nil {
 		return storageProblem()
 	}
 	e.dirty = false
+	e.publish()
 	return nil
 }
 func (m *Manager) flush(e *entry) error {
@@ -134,6 +139,7 @@ func (m *Manager) flush(e *entry) error {
 		return storageProblem()
 	}
 	e.dirty = false
+	e.publish()
 	return nil
 }
 func metadataOf(e *entry) Metadata {
@@ -143,6 +149,14 @@ func metadataOf(e *entry) Metadata {
 		meta.Error = storageProblem()
 	}
 	return meta
+}
+func (e *entry) publish() {
+	if e.deleted {
+		e.snapshot.Store(nil)
+		return
+	}
+	meta := metadataOf(e)
+	e.snapshot.Store(&meta)
 }
 
 func (m *Manager) Import(id string, in Import) (Metadata, error) {
@@ -260,6 +274,7 @@ func (m *Manager) Import(id string, in Import) (Metadata, error) {
 		return Metadata{}, invalid("Combined imported credentials exceed the 1 MiB state limit.")
 	}
 	e := &entry{state: s}
+	e.publish()
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	m.entries[id] = e
@@ -290,11 +305,9 @@ func (m *Manager) List() []Metadata {
 	m.mu.RUnlock()
 	out := []Metadata{}
 	for _, e := range entries {
-		e.mu.Lock()
-		if !e.deleted {
-			out = append(out, metadataOf(e))
+		if snapshot := e.snapshot.Load(); snapshot != nil {
+			out = append(out, *snapshot)
 		}
-		e.mu.Unlock()
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out
@@ -316,6 +329,7 @@ func (m *Manager) Forget(id string) error {
 		return storageProblem()
 	}
 	e.deleted = true
+	e.publish()
 	m.mu.Lock()
 	delete(m.entries, id)
 	m.mu.Unlock()
@@ -416,6 +430,7 @@ func (m *Manager) ensure(e *entry, force bool) error {
 		return storageProblem()
 	} // No request was sent.
 	e.state = pending
+	e.publish()
 	result := performRefresh(pending, p, m.upstream, req)
 	pending.PendingRefresh = false
 	pending.Revision++
@@ -638,6 +653,7 @@ func (m *Manager) Request(id string, in RequestInput) (RequestResult, error) {
 		return RequestResult{}, storageProblem()
 	}
 	e.state = pending
+	e.publish()
 	resp, err := m.upstream.Do(req)
 	if err != nil {
 		if connected.Load() {
