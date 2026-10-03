@@ -346,6 +346,9 @@ func nextRefreshAfterRenewal(s, before *State, p *Provider, now time.Time) time.
 			return
 		}
 		margin := time.Duration(p.RefreshBeforeSeconds) * time.Second
+		if lifetime := exp.Sub(now); margin > lifetime/2 {
+			margin = lifetime / 2
+		}
 		target := exp.Add(-margin)
 		if target.Before(next) {
 			next = target

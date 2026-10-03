@@ -33,4 +33,5 @@ UMask=0077
 WantedBy=default.target
 UNIT
 systemctl --user daemon-reload
-systemctl --user enable --now galleton.service
+systemctl --user enable galleton.service
+systemctl --user restart galleton.service

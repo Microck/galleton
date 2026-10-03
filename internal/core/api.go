@@ -146,7 +146,7 @@ func Handler(m *Manager, apiToken string) http.Handler {
 }
 func decodeBody(w http.ResponseWriter, r *http.Request, out any) bool {
 	media := strings.TrimSpace(strings.Split(r.Header.Get("Content-Type"), ";")[0])
-	if media != "application/json" {
+	if !strings.EqualFold(media, "application/json") {
 		writeError(w, problem(415, "unsupported_media_type", "Use application/json."))
 		return false
 	}
