@@ -196,7 +196,7 @@ Reconnection requires `replace: true` and `expected_revision` from the current s
 
 Vault filenames use lowercase hex encoding of session IDs, preserving `Alice` and `alice` separately on case-insensitive filesystems and avoiding Windows device names. Legacy `.session` files migrate to `.session-v2` when the vault is loaded; the encrypted format and authenticated session IDs remain compatible.
 
-A pending encrypted checkpoint precedes every refresh. Restarting with an unfinished checkpoint becomes `uncertain` rather than replaying a potentially consumed token. This cannot eliminate the distributed failure window between a remote provider and local disk. Metadata exposes errors and deadlines; unknown times may appear as `0001-01-01T00:00:00Z`. There is no push-notification subsystem.
+A pending encrypted checkpoint precedes every refresh. Restarting with an unfinished checkpoint becomes `uncertain` rather than replaying a potentially consumed token. This cannot eliminate the distributed failure window between a remote provider and local disk. Metadata exposes errors and deadlines; unknown or absent timestamps are omitted from JSON. There is no push-notification subsystem.
 
 State uses AES-256-GCM, fresh nonces, authenticated session IDs, file replacement, and an exclusive OS lock. Default key and data are co-located; compromise of that directory exposes both. `GALLETON_MASTER_KEY` accepts standard base64 encoding of 32 random bytes supplied before initialization and on every start. There is no automatic encryption-key rotation or keychain integration.
 
