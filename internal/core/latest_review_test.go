@@ -157,6 +157,7 @@ exit 0
 	cmd := exec.Command("sh", installer, binary, state, config)
 	cmd.Env = append(os.Environ(),
 		"HOME="+home,
+		"XDG_CONFIG_HOME="+filepath.Join(home, ".config"),
 		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
 		"GALLETON_TEST_LOG="+logPath,
 		"GALLETON_TEST_MARKER="+markerPath,
