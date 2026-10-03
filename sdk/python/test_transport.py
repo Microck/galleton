@@ -116,6 +116,40 @@ class TransportTests(unittest.TestCase):
             server.server_close()
             worker.join(timeout=2)
 
+    def test_truncated_content_length_response_from_loopback_server(self):
+        body = b'{"id":"alice"}'
+
+        class Handler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body) + 20))
+                self.send_header("Connection", "close")
+                self.end_headers()
+                self.wfile.write(body)
+                self.wfile.flush()
+                self.close_connection = True
+
+            def log_message(self, *_args):
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        worker = threading.Thread(target=server.serve_forever, daemon=True)
+        worker.start()
+        try:
+            client = Galleton("local", f"http://127.0.0.1:{server.server_port}", timeout=2)
+            with self.assertRaises(GalletonError) as caught:
+                client.status("alice")
+            self.assertEqual(caught.exception.code, "daemon_unavailable")
+            self.assertEqual(caught.exception.status, 200)
+            self.assertIn("may already have completed", str(caught.exception))
+        finally:
+            server.shutdown()
+            server.server_close()
+            worker.join(timeout=2)
+
 
 if __name__ == "__main__":
     unittest.main()

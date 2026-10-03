@@ -72,3 +72,21 @@ test("non-JSON HTTP errors use daemon_error", async () => {
     });
   } finally { globalThis.fetch = originalFetch; }
 });
+
+test("JSON requests replace case-variant content-type headers", async () => {
+  const originalFetch = globalThis.fetch;
+  let sent;
+  try {
+    globalThis.fetch = async (_url, options) => {
+      sent = JSON.parse(options.body);
+      return new Response(JSON.stringify({
+        status: 200, headers: {}, body_base64: "", revision: 1,
+      }), {status: 200, headers: {"Content-Type": "application/json"}});
+    };
+    await new Galleton({token: "local"}).request("account", "https://example.test/data", {
+      headers: {"content-type": "text/plain", "X-Test": "ok"},
+      json: {ok: true},
+    });
+    assert.deepEqual(sent.headers, {"X-Test": "ok", "Content-Type": "application/json"});
+  } finally { globalThis.fetch = originalFetch; }
+});

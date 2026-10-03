@@ -13,4 +13,4 @@ integration:
 	python tests/integration.py
 
 typescript:
-	tsc -p sdk/typescript/tsconfig.json
+	npx --yes --package typescript@5.8.3 tsc -p sdk/typescript/tsconfig.json

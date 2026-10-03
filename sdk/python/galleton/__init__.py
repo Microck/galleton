@@ -86,6 +86,14 @@ class Galleton:
         except (HTTPException, URLError, TimeoutError, OSError):
             raise GalletonError("daemon_unavailable", "Galleton is unavailable or the request timed out.") from None
         status = response.code
+        declared_length = None
+        if getattr(response, "headers", None) is not None:
+            value = response.headers.get("Content-Length")
+            if isinstance(value, str):
+                try:
+                    declared_length = int(value)
+                except ValueError:
+                    declared_length = -1
         try:
             with response:
                 raw = response.read(8 * 1024 * 1024 + 1)
@@ -97,6 +105,17 @@ class Galleton:
             ) from None
         if len(raw) > 8 * 1024 * 1024:
             raise GalletonError("invalid_response", "Oversized daemon response.", status)
+        if declared_length is not None:
+            if declared_length < 0:
+                raise GalletonError("invalid_response", "Invalid Content-Length in daemon response.", status)
+            if declared_length > 8 * 1024 * 1024:
+                raise GalletonError("invalid_response", "Oversized daemon response.", status)
+            if len(raw) < declared_length:
+                raise GalletonError(
+                    "daemon_unavailable",
+                    "Galleton response was interrupted; the request may already have completed.",
+                    status,
+                )
         try:
             payload = json.loads(raw)
         except (ValueError, UnicodeError):

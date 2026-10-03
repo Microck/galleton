@@ -147,6 +147,10 @@ export class Galleton {
         let body = options.body;
         if (options.json !== undefined) {
             body = JSON.stringify(options.json);
+            for (const name of Object.keys(headers)) {
+                if (name.toLowerCase() === "content-type")
+                    delete headers[name];
+            }
             headers["Content-Type"] = "application/json";
         }
         const bytes = typeof body === "string" ? new TextEncoder().encode(body) : body ?? new Uint8Array();

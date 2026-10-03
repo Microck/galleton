@@ -336,23 +336,33 @@ func (m *Manager) Forget(id string) error {
 }
 
 func nextRefresh(s *State, p *Provider, now time.Time) time.Time {
+	return nextRefreshAfterRenewal(s, nil, p, now)
+}
+
+func nextRefreshAfterRenewal(s, before *State, p *Provider, now time.Time) time.Time {
 	next := now.Add(time.Duration(p.RefreshIntervalSeconds) * time.Second)
-	consider := func(exp time.Time) {
-		if exp.IsZero() || !exp.After(now) {
+	consider := func(exp time.Time, unchanged bool) {
+		if unchanged || exp.IsZero() || !exp.After(now) {
 			return
 		}
 		margin := time.Duration(p.RefreshBeforeSeconds) * time.Second
-		if limit := exp.Sub(now) / 5; margin > limit {
-			margin = limit
-		}
 		target := exp.Add(-margin)
 		if target.Before(next) {
 			next = target
 		}
 	}
-	consider(s.AccessExpiresAt)
+	consider(s.AccessExpiresAt, before != nil && s.AccessExpiresAt.Equal(before.AccessExpiresAt))
+	previousCookies := map[string]time.Time{}
+	if before != nil {
+		for _, c := range before.Cookies {
+			key := c.Origin + "\x00" + c.Cookie.Name + "\x00" + c.Cookie.Path
+			previousCookies[key] = c.Cookie.Expires
+		}
+	}
 	for _, c := range s.Cookies {
-		consider(c.Cookie.Expires)
+		key := c.Origin + "\x00" + c.Cookie.Name + "\x00" + c.Cookie.Path
+		previous, existed := previousCookies[key]
+		consider(c.Cookie.Expires, existed && c.Cookie.Expires.Equal(previous))
 	}
 	if next.Before(now.Add(100 * time.Millisecond)) {
 		next = now.Add(100 * time.Millisecond)
@@ -439,7 +449,7 @@ func (m *Manager) ensure(e *entry, force bool) error {
 		pending.Failures = 0
 		pending.LastError = nil
 		pending.LastRefresh = e.completed
-		pending.NextRefresh = nextRefresh(pending, p, e.completed)
+		pending.NextRefresh = nextRefreshAfterRenewal(pending, s, p, e.completed)
 	} else {
 		pending.LastError = result
 		pending.Failures++
@@ -498,10 +508,11 @@ func headersFor(s *State, uRaw string) (HeadersResult, error) {
 		return HeadersResult{}, err
 	}
 	headers := map[string]string{}
-	if s.AccessToken != "" {
+	now := time.Now()
+	if s.AccessToken != "" && (s.AccessExpiresAt.IsZero() || now.Before(s.AccessExpiresAt)) {
 		headers["Authorization"] = "Bearer " + s.AccessToken
 	}
-	if c := cookieHeaders(s.Cookies, u, time.Now()); c != "" {
+	if c := cookieHeaders(s.Cookies, u, now); c != "" {
 		headers["Cookie"] = c
 	}
 	if len(headers) == 0 {

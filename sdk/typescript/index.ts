@@ -146,7 +146,13 @@ export class Galleton {
     if (options.body !== undefined && options.json !== undefined) throw new TypeError("Use body or json, not both");
     const headers = { ...options.headers };
     let body = options.body;
-    if (options.json !== undefined) { body = JSON.stringify(options.json); headers["Content-Type"] = "application/json"; }
+    if (options.json !== undefined) {
+      body = JSON.stringify(options.json);
+      for (const name of Object.keys(headers)) {
+        if (name.toLowerCase() === "content-type") delete headers[name];
+      }
+      headers["Content-Type"] = "application/json";
+    }
     const bytes = typeof body === "string" ? new TextEncoder().encode(body) : body ?? new Uint8Array();
     if (bytes.length > 1024 * 1024) throw new TypeError("Request body exceeds 1 MiB");
     const wire = await this.call<{
