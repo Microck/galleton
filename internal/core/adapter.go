@@ -134,8 +134,12 @@ func makeRefreshRequest(ctx context.Context, s *State, p *Provider) (*http.Reque
 	}
 	req.GetBody = nil // A refresh is not automatically replayable.
 	req.Header = headers
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "Galleton/"+Version)
+	if req.Header.Get("Accept") == "" {
+		req.Header.Set("Accept", "application/json")
+	}
+	if req.Header.Get("User-Agent") == "" {
+		req.Header.Set("User-Agent", "Galleton/"+Version)
+	}
 	if value := cookieHeaders(s.Cookies, u, time.Now()); value != "" {
 		req.Header.Set("Cookie", value)
 	}

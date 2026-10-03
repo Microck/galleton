@@ -269,14 +269,61 @@ func TestWindowsInstallerGracefullyReplacesRunningTask(t *testing.T) {
 	disable := strings.Index(script, "Disable-ScheduledTask")
 	shutdown := strings.Index(script, "& $Binary shutdown --dir $ExistingStateDir")
 	wait := strings.Index(script, "Test-GalletonTaskRunning) -and")
-	register := strings.Index(script, "Register-ScheduledTask")
-	start := strings.Index(script, "Start-ScheduledTask")
-	if disable < 0 || shutdown < disable || wait < shutdown || register < wait || start < register {
-		t.Fatalf("installer does not disable, gracefully drain, replace, then start the task")
+	register := strings.Index(script, `Register-ScheduledTask -TaskName "Galleton" -Action $Action`)
+	start := strings.Index(script, `Start-ScheduledTask -TaskName "Galleton"`)
+	rollback := strings.Index(script, `Register-ScheduledTask -TaskName "Galleton" -Xml $ExistingTaskXML -Force`)
+	if disable < 0 || shutdown < disable || wait < shutdown || register < wait || start < register || rollback < start {
+		t.Fatalf("installer does not disable, gracefully drain, replace, then start the task inside rollback coverage")
 	}
-	for _, required := range []string{"GetRunningTasks(1)", ".AddSeconds(330)", "Enable-ScheduledTask"} {
+	for _, required := range []string{
+		"GetRunningTasks(1)", ".AddSeconds(330)", "Export-ScheduledTask",
+		"$ExistingTaskWasEnabled", "$ExistingTaskWasRunning", "Unregister-ScheduledTask",
+	} {
 		if !strings.Contains(script, required) {
 			t.Fatalf("Windows handoff missing %q", required)
 		}
+	}
+}
+
+func TestRefreshHeaderDefaultsPreserveAdapterValues(t *testing.T) {
+	tests := []struct {
+		name       string
+		configured map[string]string
+		wantAccept string
+		wantAgent  string
+	}{
+		{"defaults", nil, "application/json", "Galleton/" + Version},
+		{"configured", map[string]string{
+			"Accept": "application/vnd.example+json",
+			"User-Agent": "Example-Renewer/1.0",
+		}, "application/vnd.example+json", "Example-Renewer/1.0"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotAccept, gotAgent string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotAccept = r.Header.Get("Accept")
+				gotAgent = r.Header.Get("User-Agent")
+				_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
+			}))
+			defer server.Close()
+
+			p := providerFor(server.URL)
+			p.Kind = "http"
+			p.RefreshURL = server.URL + "/token"
+			p.RefreshMethod = "POST"
+			p.RefreshHeaders = tc.configured
+			p.Response = ResponseMapping{Success: "/ok"}
+			m, _, _ := managerFor(t, p)
+			if _, err := m.Import("alice", Import{Provider: "test", RefreshToken: "r0"}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := m.Refresh("alice"); err != nil {
+				t.Fatal(err)
+			}
+			if gotAccept != tc.wantAccept || gotAgent != tc.wantAgent {
+				t.Fatalf("refresh headers = Accept %q, User-Agent %q; want %q, %q", gotAccept, gotAgent, tc.wantAccept, tc.wantAgent)
+			}
+		})
 	}
 }

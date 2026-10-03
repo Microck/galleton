@@ -41,11 +41,19 @@ $Settings = New-ScheduledTaskSettingsSet -StartWhenAvailable `
     -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::Zero) `
     -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
 $ExistingTask = Get-ScheduledTask -TaskName "Galleton" -ErrorAction SilentlyContinue
+$ExistingTaskXML = $null
+$ExistingTaskWasEnabled = $false
+$ExistingTaskWasRunning = $false
 if ($null -ne $ExistingTask) {
-    # Prevent a recovery trigger from racing the replacement while the old
-    # process drains. The prior task is re-enabled if the handoff fails.
-    Disable-ScheduledTask -TaskName "Galleton" | Out-Null
-    try {
+    $ExistingTaskXML = Export-ScheduledTask -TaskName "Galleton"
+    $ExistingTaskWasEnabled = $ExistingTask.State -ne "Disabled"
+    $ExistingTaskWasRunning = $ExistingTask.State -eq "Running"
+}
+try {
+    if ($null -ne $ExistingTask) {
+        # Prevent a recovery trigger from racing the replacement while the old
+        # process drains.
+        Disable-ScheduledTask -TaskName "Galleton" | Out-Null
         $TaskService = New-Object -ComObject "Schedule.Service"
         $TaskService.Connect()
         function Test-GalletonTaskRunning {
@@ -78,11 +86,29 @@ if ($null -ne $ExistingTask) {
             }
         }
     }
-    catch {
-        Enable-ScheduledTask -TaskName "Galleton" | Out-Null
-        throw
-    }
+    Register-ScheduledTask -TaskName "Galleton" -Action $Action -Trigger @($LogonTrigger, $RecoveryTrigger) `
+        -Principal $Principal -Settings $Settings -Force | Out-Null
+    Start-ScheduledTask -TaskName "Galleton"
 }
-Register-ScheduledTask -TaskName "Galleton" -Action $Action -Trigger @($LogonTrigger, $RecoveryTrigger) `
-    -Principal $Principal -Settings $Settings -Force | Out-Null
-Start-ScheduledTask -TaskName "Galleton"
+catch {
+    $InstallFailure = $_
+    if ($null -ne $ExistingTaskXML) {
+        Register-ScheduledTask -TaskName "Galleton" -Xml $ExistingTaskXML -Force | Out-Null
+        if ($ExistingTaskWasEnabled) {
+            Enable-ScheduledTask -TaskName "Galleton" | Out-Null
+        }
+        else {
+            Disable-ScheduledTask -TaskName "Galleton" | Out-Null
+        }
+        if ($ExistingTaskWasRunning) {
+            Start-ScheduledTask -TaskName "Galleton"
+        }
+    }
+    else {
+        $FailedTask = Get-ScheduledTask -TaskName "Galleton" -ErrorAction SilentlyContinue
+        if ($null -ne $FailedTask) {
+            Unregister-ScheduledTask -TaskName "Galleton" -Confirm:$false
+        }
+    }
+    throw $InstallFailure
+}
