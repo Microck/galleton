@@ -20,7 +20,7 @@ def main():
         "Label": label,
         "ProgramArguments": [str(binary), "serve", "--dir", str(state), "--config", str(config)],
         "RunAtLoad": True, "KeepAlive": True, "ThrottleInterval": 10,
-        "ProcessType": "Background", "ExitTimeOut": 300,
+        "ProcessType": "Background", "ExitTimeOut": 330,
         "StandardOutPath": str(state / "service.stdout.log"),
         "StandardErrorPath": str(state / "service.stderr.log"),
     }

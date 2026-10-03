@@ -99,6 +99,73 @@ func TestSystemdInstallerRestartsUpdatedUnit(t *testing.T) {
 	}
 }
 
+func TestServiceStopTimeoutsExceedShutdownBudget(t *testing.T) {
+	systemd, err := os.ReadFile(filepath.Join("..", "..", "deploy", "install-systemd.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(systemd), "TimeoutStopSec=330") {
+		t.Fatalf("systemd stop deadline does not exceed the daemon's five-minute shutdown budget")
+	}
+	launchd, err := os.ReadFile(filepath.Join("..", "..", "deploy", "install-launchd.py"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(launchd), `"ExitTimeOut": 330`) {
+		t.Fatalf("launchd stop deadline does not exceed the daemon's five-minute shutdown budget")
+	}
+}
+
+func TestRetryWaitUsesCredentialsForRequestedOrigin(t *testing.T) {
+	cookieServer := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer cookieServer.Close()
+	var resourceHits atomic.Int32
+	resourceServer := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		resourceHits.Add(1)
+	}))
+	defer resourceServer.Close()
+
+	p := providerFor(cookieServer.URL)
+	p.Origins = append(p.Origins, resourceServer.URL)
+	m, _, _ := managerFor(t, p)
+	if _, err := m.Import("alice", Import{
+		Provider:        "test",
+		AccessToken:     "expired",
+		RefreshToken:    "r0",
+		AccessExpiresAt: time.Now().Add(-time.Minute),
+		CookieOrigin:    cookieServer.URL,
+		CookieHeader:    "sid=live",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	e, err := m.get("alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	retryAt := time.Now().UTC().Add(time.Hour)
+	e.state.Status = "retry_wait"
+	e.state.NextRefresh = retryAt
+
+	_, err = m.Headers("alice", resourceServer.URL+"/headers")
+	if p := AsProblem(err); p.Code != "retry_later" || !p.RetryAt.Equal(retryAt) {
+		t.Fatalf("Headers error = %#v, want retry_later at %s", p, retryAt)
+	}
+	_, err = m.Request("alice", RequestInput{URL: resourceServer.URL + "/request"})
+	if p := AsProblem(err); p.Code != "retry_later" || !p.RetryAt.Equal(retryAt) {
+		t.Fatalf("Request error = %#v, want retry_later at %s", p, retryAt)
+	}
+	if got := resourceHits.Load(); got != 0 {
+		t.Fatalf("resource origin was contacted %d times during retry_wait", got)
+	}
+
+	e.state.Status = "ready"
+	e.state.AccessToken = ""
+	e.state.AccessExpiresAt = time.Time{}
+	e.state.NextRefresh = time.Now().UTC().Add(time.Hour)
+	_, err = m.Headers("alice", resourceServer.URL+"/headers")
+	wantCode(t, err, "no_credentials_for_origin")
+}
+
 func TestExpiredBearerIsDroppedAfterCookieOnlyRenewal(t *testing.T) {
 	var renewals atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

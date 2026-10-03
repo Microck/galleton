@@ -527,6 +527,16 @@ func headersFor(s *State, uRaw string) (HeadersResult, error) {
 	}
 	return HeadersResult{headers, s.Revision, s.AccessExpiresAt}, nil
 }
+
+func retryWaitProblem(s *State, err error) error {
+	if p := AsProblem(err); p.Code == "no_credentials_for_origin" &&
+		s.Status == "retry_wait" && time.Now().UTC().Before(s.NextRefresh) {
+		retry := problem(503, "retry_later", "Renewal is waiting for its retry deadline.")
+		retry.RetryAt = s.NextRefresh
+		return retry
+	}
+	return err
+}
 func (m *Manager) Headers(id, rawURL string) (HeadersResult, error) {
 	e, err := m.get(id)
 	if err != nil {
@@ -544,7 +554,11 @@ func (m *Manager) Headers(id, rawURL string) (HeadersResult, error) {
 	if err = m.ensure(e, false); err != nil {
 		return HeadersResult{}, err
 	}
-	return headersFor(e.state, rawURL)
+	result, err := headersFor(e.state, rawURL)
+	if err != nil {
+		return HeadersResult{}, retryWaitProblem(e.state, err)
+	}
+	return result, nil
 }
 func (m *Manager) Capture(id, rawURL string, lines []string) (Metadata, error) {
 	e, err := m.get(id)
@@ -645,7 +659,7 @@ func (m *Manager) Request(id string, in RequestInput) (RequestResult, error) {
 	}
 	auth, err := headersFor(e.state, u.String())
 	if err != nil {
-		return RequestResult{}, err
+		return RequestResult{}, retryWaitProblem(e.state, err)
 	}
 	for k, v := range auth.Headers {
 		headers.Set(k, v)

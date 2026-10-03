@@ -25,7 +25,7 @@ Type=simple
 ExecStart="$binary" serve --dir "$state" --config "$config"
 Restart=on-failure
 RestartSec=5
-TimeoutStopSec=300
+TimeoutStopSec=330
 NoNewPrivileges=yes
 UMask=0077
 
