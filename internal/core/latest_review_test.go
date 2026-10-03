@@ -99,6 +99,48 @@ func TestSystemdInstallerRestartsUpdatedUnit(t *testing.T) {
 	}
 }
 
+func TestExpiredBearerIsDroppedAfterCookieOnlyRenewal(t *testing.T) {
+	var renewals atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		renewals.Add(1)
+		_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
+	}))
+	defer server.Close()
+
+	p := providerFor(server.URL)
+	p.Kind = "http"
+	p.RefreshURL = server.URL + "/token"
+	p.RefreshMethod = "POST"
+	p.Response = ResponseMapping{Success: "/ok"}
+	p.RefreshIntervalSeconds = 3600
+	m, _, _ := managerFor(t, p)
+	if _, err := m.Import("alice", Import{
+		Provider:        "test",
+		AccessToken:     "expired",
+		AccessExpiresAt: time.Now().Add(-time.Minute),
+		CookieOrigin:    server.URL,
+		CookieHeader:    "sid=live",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	for i := 0; i < 2; i++ {
+		got, err := m.Headers("alice", server.URL+"/resource")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := got.Headers["Authorization"]; ok {
+			t.Fatalf("expired bearer token survived renewal: %#v", got.Headers)
+		}
+		if got.Headers["Cookie"] != "sid=live" {
+			t.Fatalf("usable cookie missing: %#v", got.Headers)
+		}
+	}
+	if got := renewals.Load(); got != 1 {
+		t.Fatalf("cookie-only adapter renewed %d times, want 1", got)
+	}
+}
+
 func TestRetryWaitOmitsExpiredBearerWhenCookieIsUsable(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	defer server.Close()

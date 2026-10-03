@@ -452,6 +452,10 @@ func (m *Manager) ensure(e *entry, force bool) error {
 		pending.Failures = 0
 		pending.LastError = nil
 		pending.LastRefresh = e.completed
+		if !pending.AccessExpiresAt.IsZero() && !pending.AccessExpiresAt.After(e.completed) {
+			pending.AccessToken = ""
+			pending.AccessExpiresAt = time.Time{}
+		}
 		pending.NextRefresh = nextRefreshAfterRenewal(pending, s, p, e.completed)
 	} else {
 		pending.LastError = result
