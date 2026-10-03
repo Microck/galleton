@@ -5,6 +5,7 @@ from pathlib import Path
 import plistlib
 import subprocess
 import sys
+import tempfile
 
 
 def main():
@@ -24,14 +25,38 @@ def main():
         "StandardOutPath": str(state / "service.stdout.log"),
         "StandardErrorPath": str(state / "service.stderr.log"),
     }
-    with destination.open("wb") as file:
-        plistlib.dump(content, file)
-    destination.chmod(0o600)
+    previous = destination.read_bytes() if destination.exists() else None
     domain = f"gui/{os.getuid()}"
-    subprocess.run(["launchctl", "bootout", domain + "/" + label], check=False,
-                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    subprocess.run(["launchctl", "bootstrap", domain, str(destination)], check=True)
-    subprocess.run(["launchctl", "kickstart", domain + "/" + label], check=True)
+    target = domain + "/" + label
+    was_loaded = subprocess.run(
+        ["launchctl", "print", target], check=False,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+    ).returncode == 0
+
+    def write_plist(payload):
+        with tempfile.NamedTemporaryFile(dir=destination.parent, delete=False) as file:
+            temporary = Path(file.name)
+            file.write(payload)
+        temporary.chmod(0o600)
+        temporary.replace(destination)
+
+    try:
+        write_plist(plistlib.dumps(content))
+        subprocess.run(["launchctl", "bootout", target], check=False,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(["launchctl", "bootstrap", domain, str(destination)], check=True)
+        subprocess.run(["launchctl", "kickstart", target], check=True)
+    except Exception:
+        subprocess.run(["launchctl", "bootout", target], check=False,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if previous is None:
+            destination.unlink(missing_ok=True)
+        else:
+            write_plist(previous)
+            if was_loaded:
+                subprocess.run(["launchctl", "bootstrap", domain, str(destination)], check=True)
+                subprocess.run(["launchctl", "kickstart", target], check=True)
+        raise
 
 
 if __name__ == "__main__":

@@ -6,7 +6,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -96,6 +98,106 @@ func TestSystemdInstallerRestartsUpdatedUnit(t *testing.T) {
 	restart := strings.Index(script, "systemctl --user restart galleton.service")
 	if enable < 0 || restart < 0 || restart < enable {
 		t.Fatalf("installer does not enable then restart the updated unit: %q", script)
+	}
+}
+
+func TestSystemdInstallerRestoresPriorUnitOnFailedRestart(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("requires a POSIX shell")
+	}
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	binDir := filepath.Join(root, "bin")
+	state := filepath.Join(root, "state")
+	for _, dir := range []string{home, binDir, state} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	binary := filepath.Join(root, "galleton")
+	config := filepath.Join(root, "adapters.json")
+	if err := os.WriteFile(binary, []byte("#!/bin/sh\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(state, "api.token"), []byte("test"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(config, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	unitDir := filepath.Join(home, ".config", "systemd", "user")
+	if err := os.MkdirAll(unitDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	unitPath := filepath.Join(unitDir, "galleton.service")
+	const oldUnit = "old working unit\n"
+	if err := os.WriteFile(unitPath, []byte(oldUnit), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(root, "systemctl.log")
+	markerPath := filepath.Join(root, "restart.failed")
+	fake := `#!/bin/sh
+echo "$*" >> "$GALLETON_TEST_LOG"
+case "$*" in
+  *"is-enabled"*) exit 0 ;;
+  *"is-active"*) exit 0 ;;
+  *"restart galleton.service"*)
+    if [ ! -e "$GALLETON_TEST_MARKER" ]; then
+      : > "$GALLETON_TEST_MARKER"
+      exit 1
+    fi
+    ;;
+esac
+exit 0
+`
+	if err := os.WriteFile(filepath.Join(binDir, "systemctl"), []byte(fake), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	installer := filepath.Join("..", "..", "deploy", "install-systemd.sh")
+	cmd := exec.Command("sh", installer, binary, state, config)
+	cmd.Env = append(os.Environ(),
+		"HOME="+home,
+		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"GALLETON_TEST_LOG="+logPath,
+		"GALLETON_TEST_MARKER="+markerPath,
+	)
+	if err := cmd.Run(); err == nil {
+		t.Fatal("installer succeeded despite synthetic restart failure")
+	}
+	got, err := os.ReadFile(unitPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != oldUnit {
+		t.Fatalf("failed reinstall left unit %q, want restored %q", got, oldUnit)
+	}
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := string(logData)
+	if strings.Count(log, "--user daemon-reload") < 2 ||
+		strings.Count(log, "--user restart galleton.service") < 2 {
+		t.Fatalf("rollback did not reload and restart the prior unit:\n%s", log)
+	}
+}
+
+func TestLaunchdInstallerRestoresPriorPlist(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "deploy", "install-launchd.py"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(raw)
+	for _, required := range []string{
+		"previous = destination.read_bytes()",
+		"was_loaded = subprocess.run(",
+		"except Exception:",
+		"write_plist(previous)",
+		"destination.unlink(missing_ok=True)",
+	} {
+		if !strings.Contains(script, required) {
+			t.Fatalf("launchd rollback missing %q", required)
+		}
 	}
 }
 
@@ -238,6 +340,9 @@ func TestRetryWaitOmitsExpiredBearerWhenCookieIsUsable(t *testing.T) {
 	}
 	if got.Headers["Cookie"] != "sid=live" {
 		t.Fatalf("usable cookie missing: %#v", got.Headers)
+	}
+	if !got.ExpiresAt.IsZero() {
+		t.Fatalf("cookie-only headers expose expired bearer deadline %s", got.ExpiresAt)
 	}
 }
 

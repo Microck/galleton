@@ -2,6 +2,7 @@ package client_test
 
 import (
 	"context"
+	"errors"
 	"github.com/Microck/galleton/client"
 	"github.com/Microck/galleton/internal/core"
 	"net/http"
@@ -98,5 +99,36 @@ func TestGoClientRejectsUnsafeInputs(t *testing.T) {
 	}
 	if _, err = c.Status(context.Background(), "../bad"); err == nil {
 		t.Fatal("invalid session ID accepted")
+	}
+}
+
+func TestGoClientReturnsTypedInvalidResponse(t *testing.T) {
+	tests := []struct {
+		name string
+		body []byte
+	}{
+		{name: "malformed JSON", body: []byte("{")},
+		{name: "oversized response", body: make([]byte, (8<<20)+1)},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write(tc.body)
+			}))
+			defer server.Close()
+			c, err := client.New(server.URL, "local-token")
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = c.Status(context.Background(), "alice")
+			var typed *client.Error
+			if !errors.As(err, &typed) {
+				t.Fatalf("error = %T %v, want *client.Error", err, err)
+			}
+			if typed.Code != "invalid_response" || typed.Status != http.StatusOK {
+				t.Fatalf("typed error = %#v, want invalid_response with status 200", typed)
+			}
+		})
 	}
 }

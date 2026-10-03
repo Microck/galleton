@@ -26,8 +26,17 @@ rm ~/Library/LaunchAgents/local.galleton.plist
 ```
 
 ```powershell
-# Windows
-Stop-ScheduledTask -TaskName Galleton
+# Windows: use the installed binary and state directory.
+Disable-ScheduledTask -TaskName Galleton | Out-Null
+& C:\path\galleton.exe shutdown --dir C:\path\state
+$TaskService = New-Object -ComObject "Schedule.Service"
+$TaskService.Connect()
+$Deadline = (Get-Date).AddSeconds(330)
+do {
+    $Running = @($TaskService.GetRunningTasks(1) | Where-Object { $_.Path -eq "\Galleton" }).Count -gt 0
+    if ($Running) { Start-Sleep -Seconds 1 }
+} while ($Running -and (Get-Date) -lt $Deadline)
+if ($Running) { throw "Galleton did not stop within 330 seconds; the task was not removed." }
 Unregister-ScheduledTask -TaskName Galleton -Confirm:$false
 ```
 

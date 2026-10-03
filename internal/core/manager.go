@@ -525,7 +525,11 @@ func headersFor(s *State, uRaw string) (HeadersResult, error) {
 	if len(headers) == 0 {
 		return HeadersResult{}, problem(409, "no_credentials_for_origin", "This session has no usable headers for the requested origin.")
 	}
-	return HeadersResult{headers, s.Revision, s.AccessExpiresAt}, nil
+	var expires time.Time
+	if _, ok := headers["Authorization"]; ok {
+		expires = s.AccessExpiresAt
+	}
+	return HeadersResult{headers, s.Revision, expires}, nil
 }
 
 func retryWaitProblem(s *State, err error) error {
