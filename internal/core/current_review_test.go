@@ -467,3 +467,52 @@ func TestPostResponseSaveFailureWarnsAgainstRetry(t *testing.T) {
 		t.Fatalf("upstream hit count = %d, want 1", hits.Load())
 	}
 }
+
+func TestConfigurationErrorPersistsAtVaultBoundary(t *testing.T) {
+	p := providerFor("http://127.0.0.1:11111")
+	p.Kind = "http"
+	p.RefreshMethod = "POST"
+	p.BodyFormat = "form"
+	p.Body = map[string]string{"credential": "${secret.missing}"}
+	m, v, _ := managerFor(t, p)
+	now := time.Now().UTC()
+	s := &State{
+		ID: "alice", Provider: "test", ConfigHash: m.providers["test"].hash,
+		Status: "ready", Revision: 1, CreatedAt: now, UpdatedAt: now,
+		Secrets: map[string]string{"padding": ""},
+	}
+	for i := 0; i < 15; i++ {
+		s.Secrets[fmt.Sprintf("s%02d", i)] = strings.Repeat("x", 64<<10)
+	}
+	low, high := 0, 64<<10
+	for low+1 < high {
+		mid := low + (high-low)/2
+		s.Secrets["padding"] = strings.Repeat("x", mid)
+		if stateFitsVault(s) {
+			low = mid
+		} else {
+			high = mid
+		}
+	}
+	s.Secrets["padding"] = strings.Repeat("x", low)
+	terminal := cloneState(s)
+	terminal.Status = "configuration_error"
+	terminal.LastError = problem(409, "configuration_error", "Missing refresh credentials or invalid adapter template.")
+	if !stateFitsVault(s) || stateFitsVault(terminal) {
+		t.Fatal("invalid boundary fixture")
+	}
+	if err := v.Save(s); err != nil {
+		t.Fatal(err)
+	}
+	m.entries["alice"] = &entry{state: s}
+	_, err := m.Refresh("alice")
+	wantCode(t, err, "configuration_error")
+	states, loadErr := v.LoadAll()
+	if loadErr != nil || len(states) != 1 || states[0].Status != "configuration_error" || !stateFitsVault(states[0]) {
+		t.Fatalf("configuration error was not durably bounded: %#v %v", states, loadErr)
+	}
+	e, getErr := m.get("alice")
+	if getErr != nil || e.dirty {
+		t.Fatalf("configuration error left a dirty entry: %v", getErr)
+	}
+}

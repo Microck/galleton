@@ -403,6 +403,7 @@ func (m *Manager) ensure(e *entry, force bool) error {
 		n := cloneState(s)
 		n.Status = "configuration_error"
 		n.LastError = problem(409, "configuration_error", "Missing refresh credentials or invalid adapter template.")
+		boundTerminalState(n)
 		if err := m.commit(e, n); err != nil {
 			return err
 		}
