@@ -171,6 +171,9 @@ func (c *Client) List(ctx context.Context) ([]Metadata, error) {
 	err := c.call(ctx, "GET", "/v1/sessions", nil, &out)
 	return out.Sessions, err
 }
+func (c *Client) Shutdown(ctx context.Context) error {
+	return c.call(ctx, "POST", "/v1/shutdown", struct{}{}, nil)
+}
 func (c *Client) Refresh(ctx context.Context, id string) (Metadata, error) {
 	var out Metadata
 	p, err := idPath(id)

@@ -40,6 +40,49 @@ $Settings = New-ScheduledTaskSettingsSet -StartWhenAvailable `
     -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
     -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::Zero) `
     -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
+$ExistingTask = Get-ScheduledTask -TaskName "Galleton" -ErrorAction SilentlyContinue
+if ($null -ne $ExistingTask) {
+    # Prevent a recovery trigger from racing the replacement while the old
+    # process drains. The prior task is re-enabled if the handoff fails.
+    Disable-ScheduledTask -TaskName "Galleton" | Out-Null
+    try {
+        $TaskService = New-Object -ComObject "Schedule.Service"
+        $TaskService.Connect()
+        function Test-GalletonTaskRunning {
+            foreach ($RunningTask in @($TaskService.GetRunningTasks(1))) {
+                if ($RunningTask.Path -eq "\Galleton") {
+                    return $true
+                }
+            }
+            return $false
+        }
+        if (Test-GalletonTaskRunning) {
+            $ExistingArguments = $ExistingTask.Actions[0].Arguments
+            if ($ExistingArguments -notmatch '^serve --dir "([^"]+)" --config "') {
+                throw "Cannot identify the existing Galleton state directory; stop it manually and rerun."
+            }
+            $ExistingStateDir = $Matches[1]
+            if ($ExistingStateDir.EndsWith('\\')) {
+                $ExistingStateDir = $ExistingStateDir.Substring(0, $ExistingStateDir.Length - 1)
+            }
+            & $Binary shutdown --dir $ExistingStateDir
+            if ($LASTEXITCODE -ne 0) {
+                throw "The running Galleton did not accept a graceful shutdown; stop it manually and rerun."
+            }
+            $StopDeadline = (Get-Date).AddSeconds(330)
+            while ((Test-GalletonTaskRunning) -and (Get-Date) -lt $StopDeadline) {
+                Start-Sleep -Milliseconds 250
+            }
+            if (Test-GalletonTaskRunning) {
+                throw "Timed out waiting for Galleton to flush state and stop."
+            }
+        }
+    }
+    catch {
+        Enable-ScheduledTask -TaskName "Galleton" | Out-Null
+        throw
+    }
+}
 Register-ScheduledTask -TaskName "Galleton" -Action $Action -Trigger @($LogonTrigger, $RecoveryTrigger) `
     -Principal $Principal -Settings $Settings -Force | Out-Null
 Start-ScheduledTask -TaskName "Galleton"

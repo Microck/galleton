@@ -16,6 +16,13 @@ import (
 // full control of every session in this daemon. Do not expose it to tenants or a
 // browser. Use separate daemon instances/state directories for separate users.
 func Handler(m *Manager, apiToken string) http.Handler {
+	return HandlerWithShutdown(m, apiToken, nil)
+}
+
+// HandlerWithShutdown adds the process-control endpoint used by supervised
+// installations. shutdown must begin a graceful drain; it runs only after the
+// authenticated response has been written.
+func HandlerWithShutdown(m *Manager, apiToken string, shutdown func()) http.Handler {
 	expected := sha256.Sum256([]byte("Bearer " + apiToken))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
@@ -53,6 +60,16 @@ func Handler(m *Manager, apiToken string) http.Handler {
 		case "health":
 			if len(path) == 2 && r.Method == "GET" {
 				writeJSON(w, 200, map[string]any{"ok": true, "version": Version})
+				return
+			}
+		case "shutdown":
+			if len(path) == 2 && r.Method == "POST" && shutdown != nil {
+				var in struct{}
+				if !decodeBody(w, r, &in) {
+					return
+				}
+				writeJSON(w, http.StatusAccepted, map[string]bool{"stopping": true})
+				go shutdown()
 				return
 			}
 		case "providers":

@@ -102,7 +102,14 @@ for (const id of ["oauth-account", "cookie-account"]) {
                 data = client.request(account, provider_url + "/me").json()
                 assert data["ok"] and data["oauth_renewals"] >= 2 and data["cookie_renewals"] >= 2
             checks.append("scheduler renews beyond original refresh-token/cookie lifetimes without resubmission")
-            stop(daemon)
+            shutdown = subprocess.run(
+                [str(daemon_exe), "shutdown", "--dir", str(state_dir), "--api", api_url],
+                capture_output=True, text=True, check=True,
+            )
+            assert json.loads(shutdown.stdout)["stopping"]
+            daemon.wait(timeout=10)
+            assert daemon.returncode == 0
+            checks.append("authenticated CLI shutdown drains the daemon")
             daemon = subprocess.Popen(daemon_args, stderr=subprocess.DEVNULL)
             processes.append(daemon)
             eventually(lambda: len(client.list()) == 2)

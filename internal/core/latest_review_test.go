@@ -240,3 +240,43 @@ func TestRetryWaitOmitsExpiredBearerWhenCookieIsUsable(t *testing.T) {
 		t.Fatalf("usable cookie missing: %#v", got.Headers)
 	}
 }
+
+func TestAuthenticatedShutdownEndpoint(t *testing.T) {
+	m, _, _ := managerFor(t, providerFor("http://127.0.0.1:11111"))
+	stopped := make(chan struct{})
+	h := HandlerWithShutdown(m, "local-token", func() { close(stopped) })
+	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1/v1/shutdown", strings.NewReader("{}"))
+	req.Header.Set("Authorization", "Bearer local-token")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusAccepted || !strings.Contains(w.Body.String(), `"stopping":true`) {
+		t.Fatalf("shutdown response = %d %s", w.Code, w.Body.String())
+	}
+	select {
+	case <-stopped:
+	case <-time.After(time.Second):
+		t.Fatal("authenticated shutdown callback was not invoked")
+	}
+}
+
+func TestWindowsInstallerGracefullyReplacesRunningTask(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "deploy", "install-windows.ps1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(raw)
+	disable := strings.Index(script, "Disable-ScheduledTask")
+	shutdown := strings.Index(script, "& $Binary shutdown --dir $ExistingStateDir")
+	wait := strings.Index(script, "Test-GalletonTaskRunning) -and")
+	register := strings.Index(script, "Register-ScheduledTask")
+	start := strings.Index(script, "Start-ScheduledTask")
+	if disable < 0 || shutdown < disable || wait < shutdown || register < wait || start < register {
+		t.Fatalf("installer does not disable, gracefully drain, replace, then start the task")
+	}
+	for _, required := range []string{"GetRunningTasks(1)", ".AddSeconds(330)", "Enable-ScheduledTask"} {
+		if !strings.Contains(script, required) {
+			t.Fatalf("Windows handoff missing %q", required)
+		}
+	}
+}

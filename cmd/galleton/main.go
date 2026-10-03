@@ -25,7 +25,7 @@ func main() {
 }
 func run(args []string) error {
 	if len(args) == 0 || args[0] == "help" || args[0] == "--help" {
-		fmt.Println("Galleton " + core.Version + "\n\nCommands: init, serve, connect, status, list, refresh, forget, headers, request, version\n\nFlags follow the command, BEFORE positional IDs.\n  galleton init --dir ./state\n  galleton serve --dir ./state --config ./adapters.json\n  galleton connect --dir ./state account < credentials.json\n  galleton status --dir ./state account\n\nThe daemon listens on 127.0.0.1:8766. See README.md for adapters and SDKs.")
+		fmt.Println("Galleton " + core.Version + "\n\nCommands: init, serve, shutdown, connect, status, list, refresh, forget, headers, request, version\n\nFlags follow the command, BEFORE positional IDs.\n  galleton init --dir ./state\n  galleton serve --dir ./state --config ./adapters.json\n  galleton connect --dir ./state account < credentials.json\n  galleton status --dir ./state account\n\nThe daemon listens on 127.0.0.1:8766. See README.md for adapters and SDKs.")
 		return nil
 	}
 	if args[0] == "version" {
@@ -71,7 +71,9 @@ func run(args []string) error {
 		if err != nil {
 			return err
 		}
-		srv, err := core.NewServer(*addr, core.Handler(manager, token))
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+		defer stop()
+		srv, err := core.NewServer(*addr, core.HandlerWithShutdown(manager, token, stop))
 		if err != nil {
 			return err
 		}
@@ -79,8 +81,6 @@ func run(args []string) error {
 		if err != nil {
 			return err
 		}
-		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
-		defer stop()
 		// Handle platform termination signals as well as Ctrl-C.
 		registerTerminate(stop)
 		schedulerCtx, cancelScheduler := context.WithCancel(context.Background())
@@ -120,6 +120,9 @@ func run(args []string) error {
 	var out any
 	if args[0] == "list" {
 		out, err = c.List(ctx)
+	} else if args[0] == "shutdown" {
+		err = c.Shutdown(ctx)
+		out = map[string]bool{"stopping": err == nil}
 	} else {
 		if f.NArg() != 1 {
 			return errors.New("provide one session ID after all flags")
