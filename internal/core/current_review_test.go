@@ -441,7 +441,11 @@ func TestPostResponseSaveFailureWarnsAgainstRetry(t *testing.T) {
 	}))
 	defer server.Close()
 	m, v, _ := managerFor(t, providerFor(server.URL))
-	importOAuth(t, m)
+	if _, err := m.Import("alice", Import{
+		Provider: "test", AccessToken: "a0", RefreshToken: "r0", AccessExpiresAt: time.Now().Add(time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
 	e, err := m.get("alice")
 	if err != nil {
 		t.Fatal(err)
