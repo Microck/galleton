@@ -516,3 +516,43 @@ func TestConfigurationErrorPersistsAtVaultBoundary(t *testing.T) {
 		t.Fatalf("configuration error left a dirty entry: %v", getErr)
 	}
 }
+
+func TestRetryWaitCookieCapturePreservesDeadline(t *testing.T) {
+	for _, operation := range []string{"capture", "request"} {
+		t.Run(operation, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				http.SetCookie(w, &http.Cookie{Name: "sid", Value: "from-request", Path: "/"})
+				_, _ = fmt.Fprint(w, "ok")
+			}))
+			defer server.Close()
+			p := providerFor(server.URL)
+			p.RefreshIntervalSeconds = 60
+			m, _, _ := managerFor(t, p)
+			if _, err := m.Import("alice", Import{
+				Provider: "test", RefreshToken: "r0", CookieOrigin: server.URL, CookieHeader: "sid=old",
+			}); err != nil {
+				t.Fatal(err)
+			}
+			e, err := m.get("alice")
+			if err != nil {
+				t.Fatal(err)
+			}
+			deadline := time.Now().UTC().Add(time.Hour)
+			e.state.Status = "retry_wait"
+			e.state.NextRefresh = deadline
+			switch operation {
+			case "capture":
+				if _, err = m.Capture("alice", server.URL, []string{"sid=from-capture; Path=/"}); err != nil {
+					t.Fatal(err)
+				}
+			case "request":
+				if _, err = m.Request("alice", RequestInput{URL: server.URL}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if e.state.Status != "retry_wait" || !e.state.NextRefresh.Equal(deadline) {
+				t.Fatalf("%s shortened retry deadline: status=%s got=%s want=%s", operation, e.state.Status, e.state.NextRefresh, deadline)
+			}
+		})
+	}
+}

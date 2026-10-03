@@ -545,7 +545,7 @@ func (m *Manager) Capture(id, rawURL string, lines []string) (Metadata, error) {
 		return Metadata{}, m.cookieCaptureFailureFrom(e, n)
 	}
 	n.Revision++
-	if candidate := nextRefresh(n, p, time.Now().UTC()); candidate.Before(n.NextRefresh) {
+	if candidate := nextRefresh(n, p, time.Now().UTC()); n.Status != "retry_wait" && candidate.Before(n.NextRefresh) {
 		n.NextRefresh = candidate
 	}
 	if !stateFitsVault(n) {
@@ -668,7 +668,7 @@ func (m *Manager) Request(id string, in RequestInput) (RequestResult, error) {
 			return RequestResult{}, m.cookieCaptureFailureFrom(e, n)
 		}
 		n.Revision++
-		if candidate := nextRefresh(n, p, time.Now().UTC()); candidate.Before(n.NextRefresh) {
+		if candidate := nextRefresh(n, p, time.Now().UTC()); n.Status != "retry_wait" && candidate.Before(n.NextRefresh) {
 			n.NextRefresh = candidate
 		}
 		if !stateFitsVault(n) {
