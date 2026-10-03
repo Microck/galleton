@@ -120,8 +120,8 @@ func (m *Manager) commit(e *entry, next *State) error {
 	next.UpdatedAt = time.Now().UTC()
 	e.state = next
 	e.dirty = true
-	e.publish()
 	if err := m.vault.Save(next); err != nil {
+		e.publish()
 		return storageProblem()
 	}
 	e.dirty = false
@@ -221,6 +221,16 @@ func (m *Manager) Import(id string, in Import) (Metadata, error) {
 	if s.AccessToken == "" && s.RefreshToken == "" && len(s.Cookies) == 0 && len(s.Secrets) == 0 {
 		return Metadata{}, invalid("No usable credentials were supplied.")
 	}
+	if !in.Replace && in.ExpectedRevision == nil {
+		revision, err := m.vault.nextRevision(0)
+		if err != nil {
+			return Metadata{}, storageProblem()
+		}
+		s.Revision = revision
+		if !stateFitsVault(s) {
+			return Metadata{}, invalid("Combined imported credentials exceed the 1 MiB state limit.")
+		}
+	}
 	m.mu.Lock()
 	if old := m.entries[id]; old != nil {
 		m.mu.Unlock()
@@ -263,18 +273,7 @@ func (m *Manager) Import(id string, in Import) (Metadata, error) {
 		m.mu.Unlock()
 		return Metadata{}, invalid("The local session limit was reached.")
 	}
-	revision, err := m.vault.nextRevision(0)
-	if err != nil {
-		m.mu.Unlock()
-		return Metadata{}, storageProblem()
-	}
-	s.Revision = revision
-	if !stateFitsVault(s) {
-		m.mu.Unlock()
-		return Metadata{}, invalid("Combined imported credentials exceed the 1 MiB state limit.")
-	}
 	e := &entry{state: s}
-	e.publish()
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	m.entries[id] = e

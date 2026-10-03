@@ -100,6 +100,8 @@ class Galleton:
         try:
             payload = json.loads(raw)
         except (ValueError, UnicodeError):
+            if not 200 <= status < 300:
+                raise GalletonError("daemon_error", "Galleton request failed.", status) from None
             raise GalletonError("invalid_response", "Expected a JSON daemon response.", status) from None
         if not 200 <= status < 300:
             error = payload.get("error", {}) if isinstance(payload, dict) else {}

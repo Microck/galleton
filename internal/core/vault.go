@@ -31,7 +31,8 @@ type Vault struct {
 	revisionMu sync.Mutex
 	revision   uint64
 	// saveHook is a test-only fault injection point, before replacing the file.
-	saveHook func(*State) error
+	saveHook     func(*State) error
+	revisionHook func()
 }
 
 func DefaultDir() string {
@@ -274,6 +275,9 @@ func (v *Vault) recordRevision(revision uint64) error {
 func (v *Vault) nextRevision(after uint64) (uint64, error) {
 	v.revisionMu.Lock()
 	defer v.revisionMu.Unlock()
+	if v.revisionHook != nil {
+		v.revisionHook()
+	}
 	if after >= maxRevision || v.revision >= maxRevision {
 		return 0, errors.New("revision limit reached")
 	}

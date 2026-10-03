@@ -113,7 +113,10 @@ export class Galleton {
     }
     let decoded: unknown;
     try { decoded = JSON.parse(text); }
-    catch { throw new GalletonError("invalid_response", "Expected a JSON daemon response.", response.status); }
+    catch {
+      if (!response.ok) throw new GalletonError("daemon_error", "Galleton request failed.", response.status);
+      throw new GalletonError("invalid_response", "Expected a JSON daemon response.", response.status);
+    }
     if (!response.ok) {
       const error = (decoded as { error?: Problem }).error;
       throw new GalletonError(error?.code ?? "daemon_error",

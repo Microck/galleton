@@ -68,6 +68,22 @@ class TransportTests(unittest.TestCase):
         self.assertEqual(caught.exception.status, 503)
         body.close.assert_called_once()
 
+    def test_non_json_http_error_uses_daemon_error(self):
+        body = MagicMock()
+        body.closed = False
+        body.read.return_value = b"upstream unavailable"
+        client = Galleton("local")
+        client._opener = MagicMock()
+        client._opener.open.side_effect = HTTPError(
+            "http://127.0.0.1:8766/v1/sessions/alice", 503,
+            "Service Unavailable", {}, body,
+        )
+        with self.assertRaises(GalletonError) as caught:
+            client.status("alice")
+        self.assertEqual(caught.exception.code, "daemon_error")
+        self.assertEqual(caught.exception.status, 503)
+        body.close.assert_called_once()
+
     def test_truncated_chunked_response_from_loopback_server(self):
         class Handler(BaseHTTPRequestHandler):
             protocol_version = "HTTP/1.1"

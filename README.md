@@ -207,10 +207,10 @@ Cookies are exact-origin scoped, including scheme and port. Browser partitioning
 ```sh
 go test -race -count=1 -cover ./...
 go vet ./...
+npx --yes --package typescript@5.8.3 tsc -p sdk/typescript/tsconfig.json
 node --test sdk/typescript/test.mjs
 PYTHONPATH=sdk/python python -m unittest discover -s sdk/python -v
 python tests/integration.py
-npx --yes --package typescript@5.8.3 tsc -p sdk/typescript/tsconfig.json
 cargo test --manifest-path sdk/rust/Cargo.toml
 ```
 

@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -576,5 +577,118 @@ func TestListDoesNotBlockOnBusySession(t *testing.T) {
 		}
 	case <-time.After(250 * time.Millisecond):
 		t.Fatal("List blocked on a busy session")
+	}
+}
+
+func TestListPublishesStorageErrorOnlyAfterSaveFails(t *testing.T) {
+	m, v, _ := managerFor(t, providerFor("http://127.0.0.1:11111"))
+	importOAuth(t, m)
+	e, err := m.get("alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	v.saveHook = func(*State) error {
+		close(entered)
+		<-release
+		return nil
+	}
+	done := make(chan error, 1)
+	go func() {
+		e.mu.Lock()
+		defer e.mu.Unlock()
+		next := cloneState(e.state)
+		next.Status = "retry_wait"
+		done <- m.commit(e, next)
+	}()
+	<-entered
+	if got := m.List(); len(got) != 1 || got[0].Status != "ready" {
+		t.Fatalf("in-flight successful save leaked a dirty snapshot: %#v", got)
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if got := m.List(); len(got) != 1 || got[0].Status != "retry_wait" {
+		t.Fatalf("durable snapshot was not published: %#v", got)
+	}
+
+	v.saveHook = func(*State) error { return fmt.Errorf("save fault") }
+	e.mu.Lock()
+	failed := cloneState(e.state)
+	failed.Status = "protocol_error"
+	err = m.commit(e, failed)
+	e.mu.Unlock()
+	wantCode(t, err, "storage_failure")
+	if got := m.List(); len(got) != 1 || got[0].Status != "storage_error" {
+		t.Fatalf("failed save did not publish storage error: %#v", got)
+	}
+}
+
+func TestNewImportDoesNotHoldManagerLockDuringRevisionWrite(t *testing.T) {
+	m, v, _ := managerFor(t, providerFor("http://127.0.0.1:11111"))
+	importOAuth(t, m)
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	v.revisionHook = func() {
+		once.Do(func() { close(entered) })
+		<-release
+	}
+	defer func() { v.revisionHook = nil }()
+
+	importDone := make(chan error, 1)
+	go func() {
+		_, err := m.Import("bob", Import{Provider: "test", RefreshToken: "r0"})
+		importDone <- err
+	}()
+	<-entered
+	statusDone := make(chan error, 1)
+	go func() {
+		_, err := m.Status("alice")
+		statusDone <- err
+	}()
+	select {
+	case err := <-statusDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(250 * time.Millisecond):
+		close(release)
+		<-importDone
+		t.Fatal("new import held the manager lock during revision persistence")
+	}
+	close(release)
+	if err := <-importDone; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestListHidesNewSessionUntilSaveCompletes(t *testing.T) {
+	m, v, _ := managerFor(t, providerFor("http://127.0.0.1:11111"))
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	v.saveHook = func(*State) error {
+		close(entered)
+		<-release
+		return nil
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := m.Import("alice", Import{Provider: "test", RefreshToken: "r0"})
+		done <- err
+	}()
+	<-entered
+	if got := m.List(); len(got) != 0 {
+		t.Fatalf("new session was listed before its first save completed: %#v", got)
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if got := m.List(); len(got) != 1 || got[0].ID != "alice" || got[0].Status != "ready" {
+		t.Fatalf("durable new session was not published: %#v", got)
 	}
 }

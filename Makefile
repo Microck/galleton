@@ -3,7 +3,7 @@ build:
 	go build -trimpath -o bin/galleton ./cmd/galleton
 	go build -trimpath -o bin/demo-provider ./cmd/demo-provider
 
-test:
+test: typescript
 	go test -race -count=1 -cover ./...
 	go vet ./...
 	node --test sdk/typescript/test.mjs

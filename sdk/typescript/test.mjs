@@ -59,3 +59,16 @@ test("response limit stops buffering while the stream is being read", async () =
     assert.ok(chunks <= 10);
   } finally { globalThis.fetch = originalFetch; }
 });
+
+test("non-JSON HTTP errors use daemon_error", async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = async () => new Response("upstream unavailable", {status: 503});
+    await assert.rejects(new Galleton({token: "local"}).status("account"), error => {
+      assert.ok(error instanceof GalletonError);
+      assert.equal(error.code, "daemon_error");
+      assert.equal(error.status, 503);
+      return true;
+    });
+  } finally { globalThis.fetch = originalFetch; }
+});
