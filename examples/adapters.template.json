@@ -1,0 +1,26 @@
+{
+  "providers": [
+    {
+      "name": "my-oauth-provider",
+      "kind": "oauth2",
+      "origins": ["https://auth.example.com", "https://api.example.com"],
+      "refresh_url": "https://auth.example.com/oauth/token",
+      "client_id": "YOUR_REGISTERED_CLIENT_ID",
+      "client_auth": "none",
+      "refresh_interval_seconds": 900
+    },
+    {
+      "name": "my-cookie-provider",
+      "kind": "http",
+      "origins": ["https://app.example.com"],
+      "refresh_url": "https://app.example.com/session/refresh",
+      "refresh_method": "GET",
+      "response": {
+        "access_token_pointer": "/accessToken",
+        "expires_in_pointer": "/expiresIn",
+        "require_set_cookie": true
+      },
+      "refresh_interval_seconds": 3600
+    }
+  ]
+}

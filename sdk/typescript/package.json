@@ -1,0 +1,36 @@
+{
+  "name": "galleton",
+  "version": "0.1.0",
+  "description": "Client for the local galleton session-renewal daemon",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "node --test test.mjs"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Microck/galleton.git",
+    "directory": "sdk/typescript"
+  },
+  "homepage": "https://github.com/Microck/galleton#readme",
+  "bugs": {
+    "url": "https://github.com/Microck/galleton/issues"
+  }
+}
