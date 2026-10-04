@@ -1,0 +1,19 @@
+{
+  "providers": [
+    {
+      "name": "demo-oauth", "kind": "oauth2",
+      "origins": ["http://127.0.0.1:9909"],
+      "refresh_url": "http://127.0.0.1:9909/oauth/token",
+      "client_auth": "none", "refresh_interval_seconds": 2,
+      "allow_http_loopback": true
+    },
+    {
+      "name": "demo-cookie", "kind": "http",
+      "origins": ["http://127.0.0.1:9909"],
+      "refresh_url": "http://127.0.0.1:9909/cookie/session",
+      "refresh_method": "GET", "refresh_interval_seconds": 2,
+      "response": {"require_set_cookie": true, "success_pointer": "/ok"},
+      "allow_http_loopback": true
+    }
+  ]
+}

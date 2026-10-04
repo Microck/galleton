@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "galleton"
+version = "0.1.0"
+description = "Dependency-free Python client for a local Galleton daemon"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+readme = "README.md"
+
+[project.urls]
+Repository = "https://github.com/Microck/galleton"
+
+[tool.setuptools]
+packages = ["galleton"]
+
+[tool.setuptools.package-data]
+galleton = ["py.typed"]
