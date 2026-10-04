@@ -1,31 +1,38 @@
-# galleton 0.1.0
+<p align="center">
+  <img src="https://litter.catbox.moe/cwz7k3o9ywknb7td.png" alt="galleton" width="240">
+</p>
 
-A language-independent session-renewal daemon with TypeScript/JavaScript, Python, Go, and Rust clients.
+<p align="center">
+  <a href="https://github.com/Microck/galleton"><img src="https://img.shields.io/badge/source-github-000000?style=flat-square" alt="source"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-see%20file-000000?style=flat-square" alt="license"></a>
+</p>
 
-Import authorized credentials once during onboarding. Applications then ask Galleton to make authenticated requests or return current headers. The daemon renews supported sessions, captures replacement cookies/tokens, and persists them across restarts. Provider renewal rules are shared configuration, not language-specific application code. There is no Wallapop-specific implementation.
+---
 
-This is an initial implementation, not a production-proven or independently audited release. See [verification](docs/VERIFICATION.md), [security](SECURITY.md), and the PR's actual CI results before adoption.
+`galleton` is a language-independent session-renewal daemon. Import authorized credentials once, then let applications in TypeScript/JavaScript, Python, Go, Rust, or any language that can use HTTP/JSON request authenticated resources. The daemon renews supported sessions, stores rotated credentials, and keeps provider rules out of application code.
 
-## Scope
+This is an initial implementation, not a production-proven or independently audited release. Read [verification](docs/VERIFICATION.md) and [security](SECURITY.md) before using real credentials.
 
-One Go daemon owns renewal; any language can use its authenticated HTTP/JSON API. No FFI or mandatory Node runtime is needed. A new provider still requires its supported renewal endpoint and response mapping. A token cannot be made permanently valid when its issuer requires reauthentication, revokes it, or enforces an absolute lifetime. Offline machines cannot renew.
+## why
 
-This is a single-host, single-trust-domain service. Its local API token controls every profile in its state directory. A multi-tenant application must enforce its own user-to-profile authorization. Do not give the daemon token to a browser or end user.
+- one Go daemon serves clients written in any language
+- OAuth refresh and configured HTTP renewal adapters share one service
+- encrypted local storage persists credentials and rotation checkpoints
+- managed requests coordinate per-session use and save response cookies
+- no FFI or mandatory Node.js runtime
 
-Included: OAuth refresh-token exchange, custom HTTP renewal adapters, scheduling, encrypted persistence, rotation checkpoints, per-session coordination, managed authenticated requests, SDKs, tests, a disposable provider, an OpenAPI description, and optional startup installers.
+Galleton cannot extend a provider's token lifetime or bypass revocation, reauthentication, or provider limits. It is a single-host, single-trust-domain service, not a multi-tenant authorization layer.
 
-## Build and local demo
+## start here
 
-Use a supported, patched Go release for deployment. The source language/API minimum is Go 1.23, not a recommendation to deploy that old toolchain.
+Install Go, then build the daemon and disposable demo provider:
 
 ```sh
 go build -trimpath -o bin/galleton ./cmd/galleton
 go build -trimpath -o bin/demo-provider ./cmd/demo-provider
 ```
 
-On Windows, build executable names ending in `.exe`. No production binary or registry release is implied by the source version.
-
-Start the disposable provider in one terminal:
+Start the demo provider in one terminal:
 
 ```sh
 ./bin/demo-provider --ttl 10s
@@ -38,24 +45,29 @@ Start the daemon in another:
 ./bin/galleton serve --dir ./state --config ./examples/adapters.demo.json
 ```
 
-Connect and use the fake accounts in a third terminal:
+Connect a disposable account and make a managed request in a third:
 
 ```sh
 ./bin/galleton connect --dir ./state demo < examples/credentials.demo.oauth.json
-./bin/galleton connect --dir ./state demo-cookie < examples/credentials.demo.cookie.json
 ./bin/galleton request --dir ./state --url http://127.0.0.1:9909/me demo
 ./bin/galleton status --dir ./state demo
 ```
 
-Connect promptly after starting the demo provider: the initial refresh credentials expire after 30 seconds. The adapter renews every two seconds. Restarting only the daemon preserves credentials; restarting the disposable provider resets them and requires an explicit reconnect. The demo credentials are public test data, never production credentials.
+Connect promptly after starting the demo provider. Its initial refresh credentials expire after 30 seconds. Demo credentials are public test data, never production credentials.
 
-CLI flags precede positional IDs. `connect` reads JSON from stdin. Real credentials belong in your onboarding flow or a protected stdin stream, not shell history or committed files.
+## clients
 
-## Integrate from any language
+Client SDKs are included in this checkout. Package names do not imply that they are published to a registry.
 
-Install clients from this checkout; none of the package names implies availability on a registry.
+| language | path | requirements |
+| --- | --- | --- |
+| TypeScript / JavaScript | `sdk/typescript` | Node.js 20+ |
+| Python | `sdk/python` | Python 3.10+ |
+| Go | `client` | Go 1.23+ source/API minimum |
+| Rust | `sdk/rust` | see `sdk/rust/Cargo.toml` |
+| Other languages | HTTP/JSON API | see [OpenAPI](docs/openapi.json) |
 
-### TypeScript / JavaScript
+For example, install the TypeScript SDK from a local checkout:
 
 ```sh
 npm install /absolute/path/to/galleton/sdk/typescript
@@ -67,153 +79,52 @@ import { Galleton } from "galleton";
 
 const token = (await readFile("./state/api.token", "utf8")).trim();
 const sessions = new Galleton({ token });
-// During onboarding only: await sessions.connect("account", credentials);
 const response = await sessions.request("demo", "http://127.0.0.1:9909/me");
 if (!response.ok) throw new Error(`Upstream HTTP ${response.status}`);
 console.log(response.json());
 ```
 
-Node.js 20+ is required. Compiled JavaScript and declarations are included; there are no runtime npm dependencies. The daemon API token is separate from provider credentials and must remain server-side.
+The daemon API token grants access to every profile in its state directory. Keep it server-side; do not expose it to browsers or end users.
 
-### Python
+## configure a provider
 
-```sh
-python -m pip install /absolute/path/to/galleton/sdk/python
-```
+Start with [the adapter template](examples/adapters.template.json). Its endpoints are examples, not live integrations. Configure only provider-approved renewal endpoints and allowlist only the exact trusted origins that need credential access.
 
-```python
-from galleton import Galleton
+Cookie adapters require an endpoint that returns replacement `Set-Cookie` values. OAuth adapters require a refresh token issued for the registered client; an access token alone is not enough. See the [adapter reference](docs/ADAPTERS.md) for supported fields and templates.
 
-sessions = Galleton.from_dir("./state")
-response = sessions.request("demo", "http://127.0.0.1:9909/me")
-print(response.status, response.json())
-```
+Import real credentials through a protected onboarding flow or stdin. Do not put them in shell history, committed files, or logs.
 
-Python 3.10+; no third-party runtime dependencies. Calls are synchronous.
+## security and limits
 
-### Go
+The daemon binds to literal loopback addresses and requires a local bearer token. It encrypts stored credentials with AES-256-GCM. The default key and data are stored together, so restrict the state directory to its owning OS user. The daemon token has administrator-level access to all profiles.
 
-From a consuming module, use a checkout until a tagged release is available:
+Managed requests are buffered, limited to 1 MiB request bodies and 4 MiB responses, and are not automatically retried. Restarting with an unfinished rotation checkpoint pauses that session for review instead of replaying a potentially consumed token. The daemon does not provide multi-tenant access control, streaming, browser-equivalent cookie behavior, or protection from other local processes running as the same user.
+
+See [SECURITY.md](SECURITY.md) for the full security model and limitations.
+
+## tests
 
 ```sh
-go mod edit -require=github.com/Microck/galleton@v0.0.0
-go mod edit -replace=github.com/Microck/galleton=/absolute/path/to/galleton
-go mod tidy
+make test
+make integration
 ```
 
-Import `github.com/Microck/galleton/client`. After creating a context `ctx`:
-
-```go
-sessions, err := client.FromDir("http://127.0.0.1:8766", "./state")
-if err != nil { return err }
-response, err := sessions.Request(ctx, "demo", "GET",
-    "http://127.0.0.1:9909/me", nil, nil)
-if err != nil { return err }
-// response.Status, response.Headers, response.Body
-```
-
-See the complete executable in [examples/go/main.go](examples/go/main.go).
-
-### Rust
-
-```toml
-[dependencies]
-galleton = { path = "/absolute/path/to/galleton/sdk/rust" }
-```
-
-```rust
-use std::collections::HashMap;
-use galleton::Galleton;
-
-let sessions = Galleton::from_dir("http://127.0.0.1:8766", "./state")?;
-let response = sessions.request(
-    "demo", "GET", "http://127.0.0.1:9909/me", &HashMap::new(), &[]
-)?;
-```
-
-The Rust SDK is blocking; use a worker thread in async applications. Its dependencies are declared in Cargo.toml. Check the separate Rust CI job, since Rust was unavailable in the local preparation environment.
-
-### Other languages and existing transports
-
-Use HTTP/JSON at `http://127.0.0.1:8766`, authenticating with `Authorization: Bearer <contents of api.token>`. See [OpenAPI](docs/openapi.json).
-
-All clients expose `connect`, `status`, `list`, `refresh`, `headers`, `capture`, `forget`, and `request`. Managed `request` durably checkpoints before sending authentication and persists response cookies before returning. Restarting with an unfinished request pauses the session as `uncertain`, requiring explicit reconnection. Upstream non-2xx statuses are returned; resource calls are never automatically retried. Requests are limited to 1 MiB bodies and responses to 4 MiB, buffered rather than streamed.
-
-For an existing HTTP transport, obtain `headers(id, url)`, make the request, and pass each separate `Set-Cookie` value to `capture(id, url, values)`. Do not join Set-Cookie lines with commas. You own redirect safety and concurrency in that mode: use managed requests when resource calls can rotate single-use session cookies. Never log returned credential headers.
-
-## Configure a real provider
-
-Start from [examples/adapters.template.json](examples/adapters.template.json), whose endpoints are illustrative, not live integrations. The trusted adapter is read at daemon startup.
-
-```json
-{
-  "providers": [{
-    "name": "my-cookie-provider",
-    "kind": "http",
-    "origins": ["https://app.example.com"],
-    "refresh_url": "https://app.example.com/session/refresh",
-    "refresh_method": "GET",
-    "response": {"require_set_cookie": true},
-    "refresh_interval_seconds": 3600
-  }]
-}
-```
-
-This example assumes the provider actually renews through that endpoint and returns replacement cookies. Set a provider-appropriate interval; one hour is not a universal safe value. Import credentials once through your application:
-
-```json
-{
-  "provider": "my-cookie-provider",
-  "cookie_origin": "https://app.example.com",
-  "cookie_header": "session=USER_SUPPLIED_VALUE"
-}
-```
-
-OAuth adapters use `kind: "oauth2"`, a refresh URL, and a refresh token issued to the registered client. Confidential clients use `client_auth: "basic"` or `"body"` and `client_secret_env`. An access token alone is insufficient. Custom request bodies, CSRF headers, and response fields use restricted templates and JSON pointers; see [adapter reference](docs/ADAPTERS.md).
-
-Changing a provider configuration conservatively blocks its existing sessions until explicit reconnection, including scheduling-only changes in this version. All allowlisted origins are trusted credential destinations; never include unrelated sites.
-
-## Run independently of the application
-
-The daemon must remain running to renew sessions when the main application closes. Startup installation is explicit and optional:
+The Rust SDK has a separate test command:
 
 ```sh
-sh deploy/install-systemd.sh /path/to/galleton /path/to/state /path/to/adapters.json
-python3 deploy/install-launchd.py /path/to/galleton /path/to/state /path/to/adapters.json
-```
-
-```powershell
-.\deploy\install-windows.ps1 -Binary C:\path\galleton.exe -StateDir C:\path\state -Config C:\path\adapters.json
-```
-
-Use the installer for your operating system, after initialization and after stopping a manually running daemon. These are user-level jobs, not a guarantee of execution while logged out. See [deployment](deploy/README.md) for service environments, limitations, and uninstall commands. The installers were not executed locally.
-
-## Failure and persistence contract
-
-`retry_wait` applies renewal backoff and honors Retry-After; credentials that remain valid are still available for resource requests. `storage_error` means a replacement credential has not been durably acknowledged; the daemon retries persistence before another renewal and flushes dirty credentials on shutdown. `reauth_required`, `uncertain`, `configuration_error`, and `protocol_error` stop automatic renewal. Handle them through explicit provider-approved reconnection; do not hide them behind endless retries. `forget` removes local state but does not revoke credentials at the provider.
-
-Reconnection requires `replace: true` and `expected_revision` from the current status. Supply freshly obtained credentials and that revision in the same connect request. Retrying a lost response must keep the original revision: a `revision_conflict` prevents overwriting a newer rotation. Do not fetch a newer revision just to replay the same credential payload; inspect status and obtain fresh provider credentials if another reconnect is needed. A replacement cannot create a missing session.
-
-Vault filenames use lowercase hex encoding of session IDs, preserving `Alice` and `alice` separately on case-insensitive filesystems and avoiding Windows device names. Legacy `.session` files migrate to `.session-v2` when the vault is loaded; the encrypted format and authenticated session IDs remain compatible.
-
-A pending encrypted checkpoint precedes every refresh. Restarting with an unfinished checkpoint becomes `uncertain` rather than replaying a potentially consumed token. This cannot eliminate the distributed failure window between a remote provider and local disk. Metadata exposes errors and deadlines; unknown or absent timestamps are omitted from JSON. There is no push-notification subsystem.
-
-State uses AES-256-GCM, fresh nonces, authenticated session IDs, file replacement, and an exclusive OS lock. Default key and data are co-located; compromise of that directory exposes both. `GALLETON_MASTER_KEY` accepts standard base64 encoding of 32 random bytes supplied before initialization and on every start. There is no automatic encryption-key rotation or keychain integration.
-
-Cookies are exact-origin scoped, including scheme and port. Browser partitioning, SameSite navigation evaluation, device-bound authentication, DPoP/mTLS, and login UI are outside this version. Read [SECURITY.md](SECURITY.md) before retaining real credentials.
-
-## Tests
-
-```sh
-go test -race -count=1 -cover ./...
-go vet ./...
-npx --yes --package typescript@5.8.3 tsc -p sdk/typescript/tsconfig.json
-node --test sdk/typescript/test.mjs
-PYTHONPATH=sdk/python python -m unittest discover -s sdk/python -v
-python tests/integration.py
 cargo test --manifest-path sdk/rust/Cargo.toml
 ```
 
-The integration test uses only disposable loopback credentials and exercises renewal beyond original lifetimes plus daemon restart. GitHub CI separately tests Go on Linux/macOS/Windows, language clients and integration, and Rust. Actual completed results, not merely configured jobs, determine verification status.
+Configured CI jobs are not proof that a run passed. Check the actual workflow results and [verification notes](docs/VERIFICATION.md).
 
-Source package names are `galleton`; the executable is `galleton`; environment variables use `GALLETON_`. Nothing has been published to npm, PyPI, or crates.io. Generated distribution archives are not committed. See [rename compatibility](docs/RENAMING.md) for existing encrypted state.
+## documentation
+
+- [adapter reference](docs/ADAPTERS.md)
+- [deployment and startup installers](deploy/README.md)
+- [OpenAPI description](docs/openapi.json)
+- [security model](SECURITY.md)
+- [verification status](docs/VERIFICATION.md)
+
+## license
+
+See [LICENSE](LICENSE).
