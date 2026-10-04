@@ -9,7 +9,7 @@
 
 ---
 
-`galleton` is a language-independent session-renewal daemon. Import authorized credentials once, then let applications in TypeScript/JavaScript, Python, Go, Rust, or any language that can use HTTP/JSON request authenticated resources. The daemon renews supported sessions, stores rotated credentials, and keeps provider rules out of application code.
+`galleton` is a language-independent session-renewal daemon. it lets applications in TypeScript/JavaScript, Python, Go, Rust, or any language that can use HTTP/JSON make authenticated requests after you import authorized credentials once. the daemon renews supported sessions, stores rotated credentials, and keeps provider rules out of application code.
 
 ## why
 
@@ -19,31 +19,31 @@
 - managed requests coordinate per-session use and save response cookies
 - no FFI or mandatory Node.js runtime
 
-Galleton cannot extend a provider's token lifetime or bypass revocation, reauthentication, or provider limits. It is a single-host, single-trust-domain service, not a multi-tenant authorization layer.
+the daemon cannot extend a provider's token lifetime or bypass revocation, reauthentication, or provider limits. it is a single-host, single-trust-domain service, not a multi-tenant authorization layer.
 
 ## start here
 
-Install Go, then build the daemon and disposable demo provider:
+build the daemon and disposable demo provider with Go:
 
 ```sh
 go build -trimpath -o bin/galleton ./cmd/galleton
 go build -trimpath -o bin/demo-provider ./cmd/demo-provider
 ```
 
-Start the demo provider in one terminal:
+run the demo provider in one terminal:
 
 ```sh
 ./bin/demo-provider --ttl 10s
 ```
 
-Start the daemon in another:
+start the daemon in another:
 
 ```sh
 ./bin/galleton init --dir ./state
 ./bin/galleton serve --dir ./state --config ./examples/adapters.demo.json
 ```
 
-Connect a disposable account and make a managed request in a third:
+connect a disposable account and make a managed request in a third:
 
 ```sh
 ./bin/galleton connect --dir ./state demo < examples/credentials.demo.oauth.json
@@ -51,11 +51,11 @@ Connect a disposable account and make a managed request in a third:
 ./bin/galleton status --dir ./state demo
 ```
 
-Connect promptly after starting the demo provider. Its initial refresh credentials expire after 30 seconds. Demo credentials are public test data, never production credentials.
+connect promptly after starting the demo provider. its initial refresh credentials expire after 30 seconds. demo credentials are public test data, never production credentials.
 
 ## clients
 
-The SDKs are available in this repository. Install them from a local checkout:
+the SDKs are available in this repository. install them from a local checkout:
 
 | language | path | requirements |
 | --- | --- | --- |
@@ -63,9 +63,9 @@ The SDKs are available in this repository. Install them from a local checkout:
 | Python | `sdk/python` | Python 3.10+ |
 | Go | `client` | Go 1.23+ source/API minimum |
 | Rust | `sdk/rust` | see `sdk/rust/Cargo.toml` |
-| Other languages | HTTP/JSON API | see [OpenAPI](docs/openapi.json) |
+| other languages | HTTP/JSON API | see [OpenAPI](docs/openapi.json) |
 
-For example, install the TypeScript SDK:
+for example, install the TypeScript SDK:
 
 ```sh
 npm install /absolute/path/to/galleton/sdk/typescript
@@ -82,23 +82,23 @@ if (!response.ok) throw new Error(`Upstream HTTP ${response.status}`);
 console.log(response.json());
 ```
 
-The daemon API token grants access to every profile in its state directory. Keep it server-side; do not expose it to browsers or end users.
+the daemon API token grants access to every profile in its state directory. keep it server-side; do not expose it to browsers or end users.
 
 ## configure a provider
 
-Start with [the adapter template](examples/adapters.template.json). Its endpoints are examples, not live integrations. Configure only provider-approved renewal endpoints and allowlist only the exact trusted origins that need credential access.
+start with [the adapter template](examples/adapters.template.json). its endpoints are examples, not live integrations. configure only provider-approved renewal endpoints and allowlist only the exact trusted origins that need credential access.
 
-Cookie adapters require an endpoint that returns replacement `Set-Cookie` values. OAuth adapters require a refresh token issued for the registered client; an access token alone is not enough. See the [adapter reference](docs/ADAPTERS.md) for supported fields and templates.
+cookie adapters require an endpoint that returns replacement `Set-Cookie` values. for OAuth adapters, a refresh token issued for the registered client is required; an access token alone is not enough. see the [adapter reference](docs/ADAPTERS.md) for supported fields and templates.
 
-Import real credentials through a protected onboarding flow or stdin. Do not put them in shell history, committed files, or logs.
+import real credentials through a protected onboarding flow or stdin. do not put them in shell history, committed files, or logs.
 
 ## security and limits
 
-The daemon binds to literal loopback addresses and requires a local bearer token. It encrypts stored credentials with AES-256-GCM. The default key and data are stored together, so restrict the state directory to its owning OS user. The daemon token has administrator-level access to all profiles.
+the daemon binds to literal loopback addresses and requires a local bearer token. it encrypts stored credentials with AES-256-GCM. the default key and data are stored together, so restrict the state directory to its owning OS user. the daemon token has administrator-level access to all profiles.
 
-Managed requests are buffered, limited to 1 MiB request bodies and 4 MiB responses, and are not automatically retried. Restarting with an unfinished rotation checkpoint pauses that session for review instead of replaying a potentially consumed token. The daemon does not provide multi-tenant access control, streaming, browser-equivalent cookie behavior, or protection from other local processes running as the same user.
+managed requests are buffered, limited to 1 MiB request bodies and 4 MiB responses, and are not automatically retried. restarting with an unfinished rotation checkpoint pauses that session for review instead of replaying a potentially consumed token. the daemon does not provide multi-tenant access control, streaming, browser-equivalent cookie behavior, or protection from other local processes running as the same user.
 
-See [SECURITY.md](SECURITY.md) for the full security model and limitations.
+see [SECURITY.md](SECURITY.md) for the full security model and limitations.
 
 ## tests
 
@@ -118,4 +118,4 @@ cargo test --manifest-path sdk/rust/Cargo.toml
 
 ## license
 
-See [LICENSE](LICENSE).
+see [LICENSE](LICENSE).
