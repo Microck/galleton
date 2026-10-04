@@ -11,8 +11,6 @@
 
 `galleton` is a language-independent session-renewal daemon. Import authorized credentials once, then let applications in TypeScript/JavaScript, Python, Go, Rust, or any language that can use HTTP/JSON request authenticated resources. The daemon renews supported sessions, stores rotated credentials, and keeps provider rules out of application code.
 
-This is an initial implementation, not a production-proven or independently audited release. Read [verification](docs/VERIFICATION.md) and [security](SECURITY.md) before using real credentials.
-
 ## why
 
 - one Go daemon serves clients written in any language
@@ -57,7 +55,7 @@ Connect promptly after starting the demo provider. Its initial refresh credentia
 
 ## clients
 
-Client SDKs are included in this checkout. Package names do not imply that they are published to a registry.
+The SDKs are available in this repository. Install them from a local checkout:
 
 | language | path | requirements |
 | --- | --- | --- |
@@ -67,7 +65,7 @@ Client SDKs are included in this checkout. Package names do not imply that they 
 | Rust | `sdk/rust` | see `sdk/rust/Cargo.toml` |
 | Other languages | HTTP/JSON API | see [OpenAPI](docs/openapi.json) |
 
-For example, install the TypeScript SDK from a local checkout:
+For example, install the TypeScript SDK:
 
 ```sh
 npm install /absolute/path/to/galleton/sdk/typescript
@@ -107,15 +105,8 @@ See [SECURITY.md](SECURITY.md) for the full security model and limitations.
 ```sh
 make test
 make integration
-```
-
-The Rust SDK has a separate test command:
-
-```sh
 cargo test --manifest-path sdk/rust/Cargo.toml
 ```
-
-Configured CI jobs are not proof that a run passed. Check the actual workflow results and [verification notes](docs/VERIFICATION.md).
 
 ## documentation
 
