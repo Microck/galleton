@@ -1,6 +1,12 @@
 # galleton (TypeScript / JavaScript)
 
-Local source distribution, not a published npm package. Node.js 20+ or another compatible server-side runtime with fetch is required. Built JavaScript and TypeScript declarations are included; there are no runtime npm dependencies.
+Node.js 20+ is required. The package includes ESM JavaScript and TypeScript declarations, with no runtime npm dependencies.
+
+```sh
+npm install galleton
+```
+
+Run a configured Galleton daemon separately. Installing this SDK does not install or start the daemon. Read its private API token from a protected file; never put it in source code or command arguments.
 
 ```ts
 import { Galleton } from "galleton";

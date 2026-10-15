@@ -1,7 +1,7 @@
 {
   "name": "galleton",
   "version": "0.1.0",
-  "description": "Client for the local galleton session-renewal daemon",
+  "description": "Server-side TypeScript and JavaScript client for the local Galleton session daemon",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -21,7 +21,10 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "node --test test.mjs"
+    "test": "node --test test.mjs",
+    "check": "npm run build && npm test",
+    "prepack": "npm run check",
+    "prepublishOnly": "npm run check"
   },
   "license": "MIT",
   "repository": {
@@ -32,5 +35,11 @@
   "homepage": "https://github.com/Microck/galleton#readme",
   "bugs": {
     "url": "https://github.com/Microck/galleton/issues"
+  },
+  "devDependencies": {
+    "typescript": "5.8.3"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

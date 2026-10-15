@@ -46,9 +46,9 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: '3.13'
-      - run: npx --yes --package typescript@5.8.3 tsc -p sdk/typescript/tsconfig.json
+      - run: npm --prefix sdk/typescript ci
+      - run: npm --prefix sdk/typescript run check
       - run: git diff --exit-code -- sdk/typescript/dist
-      - run: node --test sdk/typescript/test.mjs
       - run: PYTHONPATH=sdk/python python -m unittest discover -s sdk/python -v
       - run: python tests/integration.py
   rust:

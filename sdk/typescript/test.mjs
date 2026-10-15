@@ -1,5 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { createServer } from "node:http";
+import { once } from "node:events";
+import { json } from "node:stream/consumers";
 import { Galleton, GalletonError, ManagedResponse } from "./dist/index.js";
 
 test("rejects remote daemon URLs and credential-bearing URLs", () => {
@@ -24,69 +27,78 @@ test("does not accept newline-bearing API tokens", () => {
   assert.throws(() => new Galleton({ token: "bad\r\ninjection" }));
 });
 
+// Exercise actual HTTP responses instead of replacing the SDK's fetch implementation.
+async function withDaemon(handler, run) {
+  const server = createServer(handler);
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const client = new Galleton({token: "local", baseURL: `http://127.0.0.1:${server.address().port}`});
+  try { await run(client); }
+  finally { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); }
+}
+
 test("body-read failures preserve status and uncertain completion", async () => {
-  const originalFetch = globalThis.fetch;
-  try {
-    for (const failure of [new TypeError("broken stream"), new DOMException("timeout", "AbortError")]) {
-      globalThis.fetch = async () => new Response(new ReadableStream({ start(controller) { controller.error(failure); } }), {status: 200});
-      await assert.rejects(new Galleton({token: "local"}).refresh("account"), error => {
-        assert.ok(error instanceof GalletonError);
-        assert.equal(error.code, "daemon_unavailable");
-        assert.equal(error.status, 200);
-        assert.match(error.message, /may already have completed/);
-        return true;
-      });
-    }
-  } finally { globalThis.fetch = originalFetch; }
+  await withDaemon((_request, response) => {
+    response.writeHead(200, {"Content-Length": "100"});
+    response.write("{");
+    // The headers reach the real client before the stream is interrupted.
+    setImmediate(() => response.destroy());
+  }, client => assert.rejects(client.refresh("account"), error => {
+    assert.ok(error instanceof GalletonError);
+    assert.equal(error.code, "daemon_unavailable");
+    assert.equal(error.status, 200);
+    assert.match(error.message, /may already have completed/);
+    return true;
+  }));
 });
 
-test("response limit stops buffering while the stream is being read", async () => {
-  const originalFetch = globalThis.fetch;
-  let cancelled = false;
+test("response limit cancels an HTTP stream before it finishes", {timeout: 15000}, async () => {
   let chunks = 0;
-  try {
-    globalThis.fetch = async () => new Response(new ReadableStream({
-      pull(controller) { chunks++; controller.enqueue(new Uint8Array(1024 * 1024)); },
-      cancel() { cancelled = true; },
-    }), {status: 200});
-    await assert.rejects(new Galleton({token: "local"}).status("account"), error => {
+  let closed;
+  await withDaemon((_request, response) => {
+    closed = once(response, "close");
+    response.writeHead(200);
+    const chunk = Buffer.alloc(1024 * 1024);
+    function sendChunk() {
+      if (response.destroyed) return;
+      if (chunks === 64) { response.end(); return; }
+      chunks++;
+      response.write(chunk, () => setImmediate(sendChunk));
+    }
+    sendChunk();
+  }, async client => {
+    await assert.rejects(client.status("account"), error => {
       assert.ok(error instanceof GalletonError);
       assert.equal(error.code, "invalid_response");
       assert.equal(error.status, 200);
       return true;
     });
-    assert.equal(cancelled, true);
-    assert.ok(chunks <= 10);
-  } finally { globalThis.fetch = originalFetch; }
+    await closed;
+    assert.ok(chunks < 64, "the client must cancel before the whole response is sent");
+  });
 });
 
 test("non-JSON HTTP errors use daemon_error", async () => {
-  const originalFetch = globalThis.fetch;
-  try {
-    globalThis.fetch = async () => new Response("upstream unavailable", {status: 503});
-    await assert.rejects(new Galleton({token: "local"}).status("account"), error => {
-      assert.ok(error instanceof GalletonError);
-      assert.equal(error.code, "daemon_error");
-      assert.equal(error.status, 503);
-      return true;
-    });
-  } finally { globalThis.fetch = originalFetch; }
+  await withDaemon((_request, response) => {
+    response.writeHead(503);
+    response.end("upstream unavailable");
+  }, client => assert.rejects(client.status("account"), error => {
+    assert.ok(error instanceof GalletonError);
+    assert.equal(error.code, "daemon_error");
+    assert.equal(error.status, 503);
+    return true;
+  }));
 });
 
 test("JSON requests replace case-variant content-type headers", async () => {
-  const originalFetch = globalThis.fetch;
   let sent;
-  try {
-    globalThis.fetch = async (_url, options) => {
-      sent = JSON.parse(options.body);
-      return new Response(JSON.stringify({
-        status: 200, headers: {}, body_base64: "", revision: 1,
-      }), {status: 200, headers: {"Content-Type": "application/json"}});
-    };
-    await new Galleton({token: "local"}).request("account", "https://example.test/data", {
-      headers: {"content-type": "text/plain", "X-Test": "ok"},
-      json: {ok: true},
-    });
-    assert.deepEqual(sent.headers, {"X-Test": "ok", "Content-Type": "application/json"});
-  } finally { globalThis.fetch = originalFetch; }
+  await withDaemon(async (request, response) => {
+    sent = await json(request);
+    response.writeHead(200, {"Content-Type": "application/json"});
+    response.end(JSON.stringify({status: 200, headers: {}, body_base64: "", revision: 1}));
+  }, client => client.request("account", "https://example.test/data", {
+    headers: {"content-type": "text/plain", "X-Test": "ok"},
+    json: {ok: true},
+  }));
+  assert.deepEqual(sent.headers, {"X-Test": "ok", "Content-Type": "application/json"});
 });

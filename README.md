@@ -55,7 +55,7 @@ connect promptly after starting the demo provider. its initial refresh credentia
 
 ## clients
 
-the SDKs are available in this repository. install them from a local checkout:
+the TypeScript / JavaScript SDK is available on npm. the other SDKs are available in this repository:
 
 | language | path | requirements |
 | --- | --- | --- |
@@ -68,7 +68,7 @@ the SDKs are available in this repository. install them from a local checkout:
 for example, install the TypeScript SDK:
 
 ```sh
-npm install /absolute/path/to/galleton/sdk/typescript
+npm install galleton
 ```
 
 ```ts
