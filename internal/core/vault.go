@@ -320,7 +320,10 @@ func (v *Vault) LoadAll() ([]*State, error) {
 			current[id] = true
 		}
 	}
-	type legacyEntry struct { name string; state *State }
+	type legacyEntry struct {
+		name  string
+		state *State
+	}
 	var legacy []legacyEntry
 	for _, f := range entries {
 		isLegacy := strings.HasSuffix(f.Name(), ".session")
@@ -371,12 +374,18 @@ func (v *Vault) LoadAll() ([]*State, error) {
 	// Validate every ciphertext before changing any legacy file.
 	for _, old := range legacy {
 		if !current[old.state.ID] {
-			if err := v.Save(old.state); err != nil { return nil, err }
+			if err := v.Save(old.state); err != nil {
+				return nil, err
+			}
 		}
-		if err := os.Remove(filepath.Join(v.dir, old.name)); err != nil { return nil, err }
+		if err := os.Remove(filepath.Join(v.dir, old.name)); err != nil {
+			return nil, err
+		}
 	}
 	if len(legacy) > 0 {
-		if err := syncDir(v.dir); err != nil { return nil, err }
+		if err := syncDir(v.dir); err != nil {
+			return nil, err
+		}
 	}
 	return out, nil
 }

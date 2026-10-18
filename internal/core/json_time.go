@@ -6,7 +6,9 @@ import (
 )
 
 func optionalTime(t time.Time) *time.Time {
-	if t.IsZero() { return nil }
+	if t.IsZero() {
+		return nil
+	}
 	return &t
 }
 
@@ -16,8 +18,8 @@ func (s State) MarshalJSON() ([]byte, error) {
 	type plain State
 	return json.Marshal(struct {
 		*plain
-		LastRefresh *time.Time `json:"last_refresh,omitempty"`
-		NextRefresh *time.Time `json:"next_refresh,omitempty"`
+		LastRefresh     *time.Time `json:"last_refresh,omitempty"`
+		NextRefresh     *time.Time `json:"next_refresh,omitempty"`
 		AccessExpiresAt *time.Time `json:"access_expires_at,omitempty"`
 	}{(*plain)(&s), optionalTime(s.LastRefresh), optionalTime(s.NextRefresh), optionalTime(s.AccessExpiresAt)})
 }
@@ -26,8 +28,8 @@ func (s Metadata) MarshalJSON() ([]byte, error) {
 	type plain Metadata
 	return json.Marshal(struct {
 		*plain
-		LastRefresh *time.Time `json:"last_refresh,omitempty"`
-		NextRefresh *time.Time `json:"next_refresh,omitempty"`
+		LastRefresh     *time.Time `json:"last_refresh,omitempty"`
+		NextRefresh     *time.Time `json:"next_refresh,omitempty"`
 		AccessExpiresAt *time.Time `json:"access_expires_at,omitempty"`
 	}{(*plain)(&s), optionalTime(s.LastRefresh), optionalTime(s.NextRefresh), optionalTime(s.AccessExpiresAt)})
 }
