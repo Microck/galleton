@@ -452,7 +452,10 @@ func credentialsUsable(s *State, now time.Time) bool {
 	}
 	return false
 }
-func (m *Manager) ensure(e *entry, force bool) error {
+
+// ensure renews when needed. b is the calling API operation's budget; nil
+// starts a fresh one for a call that does nothing else upstream.
+func (m *Manager) ensure(e *entry, force bool, b *budget) error {
 	if m.stopping.Load() {
 		return problem(503, "shutting_down", "The daemon is shutting down; no new renewal was started.")
 	}
@@ -480,9 +483,12 @@ func (m *Manager) ensure(e *entry, force bool) error {
 	if p == nil || s.ConfigHash != p.hash {
 		return problem(409, "configuration_error", "Provider configuration does not match the imported session.")
 	}
+	if b == nil {
+		b = p.newBudget()
+	}
 	// A client-set pause or the provider's minimum interval defers renewal
 	// before anything is journaled or sent. Current credentials stay in use.
-	if wait := p.reserve(); wait != nil {
+	if wait := p.reserve(b); wait != nil {
 		if !force && credentialsUsable(s, now) {
 			return nil
 		}
@@ -512,7 +518,7 @@ func (m *Manager) ensure(e *entry, force bool) error {
 	} // No request was sent.
 	e.state = pending
 	e.publish()
-	if wait := p.dispatch(); wait != nil {
+	if wait := p.dispatch(b); wait != nil {
 		// Paused or crowded after the checkpoint: nothing was sent, so the
 		// session returns to its previous state instead of gaining a retry
 		// deadline that would outlive an early resume.
@@ -524,7 +530,7 @@ func (m *Manager) ensure(e *entry, force bool) error {
 		}
 		return wait
 	}
-	result := performRefresh(pending, p, p.renewal, req)
+	result := performRefresh(pending, p, p.renewal, req, b)
 	pending.PendingRefresh = false
 	pending.Revision++
 	e.completed = time.Now().UTC()
@@ -578,7 +584,7 @@ func (m *Manager) Refresh(id string) (Metadata, error) {
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if err = m.ensure(e, !e.completed.After(started)); err != nil {
+	if err = m.ensure(e, !e.completed.After(started), nil); err != nil {
 		return Metadata{}, err
 	}
 	return metadataOf(e), nil
@@ -635,7 +641,7 @@ func (m *Manager) Headers(id, rawURL string) (HeadersResult, error) {
 	if _, err = p.allowed(rawURL); err != nil {
 		return HeadersResult{}, err
 	} // Check scope before any renewal.
-	if err = m.ensure(e, false); err != nil {
+	if err = m.ensure(e, false, nil); err != nil {
 		return HeadersResult{}, err
 	}
 	result, err := headersFor(e.state, rawURL)
@@ -748,7 +754,10 @@ func (m *Manager) Request(id string, in RequestInput) (RequestResult, error) {
 	if until, paused := p.gate.paused(time.Now().UTC()); paused {
 		return RequestResult{}, pausedProblem(until)
 	}
-	if err = m.ensure(e, false); err != nil {
+	// One budget covers a renewal and the request together, so the API call
+	// cannot outlive the server's response deadline.
+	b := p.newBudget()
+	if err = m.ensure(e, false, b); err != nil {
 		return RequestResult{}, err
 	}
 	auth, err := headersFor(e.state, u.String())
@@ -776,7 +785,7 @@ func (m *Manager) Request(id string, in RequestInput) (RequestResult, error) {
 	req = req.WithContext(httptrace.WithClientTrace(req.Context(), &httptrace.ClientTrace{
 		GotConn: func(httptrace.GotConnInfo) { connected.Store(true) },
 	}))
-	if wait := p.reserve(); wait != nil {
+	if wait := p.reserve(b); wait != nil {
 		return RequestResult{}, wait
 	}
 	// Persist before any credential can reach the upstream. A restart must
@@ -789,7 +798,7 @@ func (m *Manager) Request(id string, in RequestInput) (RequestResult, error) {
 	}
 	e.state = pending
 	e.publish()
-	if wait := p.dispatch(); wait != nil {
+	if wait := p.dispatch(b); wait != nil {
 		// Paused or crowded after the checkpoint: nothing was sent.
 		n := cloneState(e.state)
 		n.PendingRequest = false
@@ -798,7 +807,7 @@ func (m *Manager) Request(id string, in RequestInput) (RequestResult, error) {
 		}
 		return RequestResult{}, wait
 	}
-	req, cancel := p.withDeadline(req)
+	req, cancel := p.withDeadline(req, b)
 	defer cancel()
 	resp, err := p.resource.Do(req)
 	if err != nil {
@@ -886,7 +895,7 @@ func (m *Manager) RunScheduler(ctx context.Context) {
 			select {
 			case sem <- struct{}{}:
 				wg.Add(1)
-				go func(e *entry) { defer wg.Done(); defer func() { <-sem; e.mu.Unlock() }(); _ = m.ensure(e, false) }(e)
+				go func(e *entry) { defer wg.Done(); defer func() { <-sem; e.mu.Unlock() }(); _ = m.ensure(e, false, nil) }(e)
 			default:
 				e.mu.Unlock()
 			}

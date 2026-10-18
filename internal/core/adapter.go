@@ -252,7 +252,7 @@ func parseRetryAfter(value string, now time.Time) time.Time {
 
 // performRefresh mutates a working copy. Even partial replacement credentials
 // are retained before a protocol error, rather than reverting to an old token.
-func performRefresh(s *State, p *Provider, client *http.Client, req *http.Request) *Problem {
+func performRefresh(s *State, p *Provider, client *http.Client, req *http.Request, b *budget) *Problem {
 	// With the built-in Go transport, no credential-bearing request can have
 	// been sent before GotConn. DNS/dial/TLS-establishment failures are safe
 	// to retry, unlike a lost response after obtaining a connection.
@@ -261,7 +261,7 @@ func performRefresh(s *State, p *Provider, client *http.Client, req *http.Reques
 	req = req.WithContext(httptrace.WithClientTrace(req.Context(), trace))
 	// ensure admitted this call through the provider's gate; the upstream
 	// timeout starts now.
-	req, cancel := p.withDeadline(req)
+	req, cancel := p.withDeadline(req, b)
 	defer cancel()
 	resp, err := client.Do(req)
 	if err != nil {

@@ -125,7 +125,7 @@ func (g *gate) reserve(interval, maxWait time.Duration) *Problem {
 		slot = g.next
 	}
 	wait := slot.Sub(now)
-	if wait > maxWait {
+	if wait > 0 && wait > maxWait {
 		g.mu.Unlock()
 		return intervalProblem(slot)
 	}
@@ -183,8 +183,24 @@ func (g *gate) release(interval time.Duration) {
 	g.next = g.last.Add(interval)
 }
 
-func (p *Provider) reserve() *Problem {
-	return p.gate.reserve(p.interval(), time.Duration(p.TimeoutSeconds)*time.Second)
+// budget bounds one API call. All of its pacing waits, for a renewal and a
+// managed request together, end by waitUntil (timeout_seconds after the call
+// started), and every upstream operation of the call ends by end (twice
+// timeout_seconds). With timeout_seconds at most 120 a call finishes inside
+// the API server's 5-minute write deadline and the SDKs' default timeouts.
+type budget struct {
+	waitUntil time.Time
+	end       time.Time
+}
+
+func (p *Provider) newBudget() *budget {
+	now := time.Now()
+	timeout := time.Duration(p.TimeoutSeconds) * time.Second
+	return &budget{waitUntil: now.Add(timeout), end: now.Add(2 * timeout)}
+}
+
+func (p *Provider) reserve(b *budget) *Problem {
+	return p.gate.reserve(p.interval(), time.Until(b.waitUntil))
 }
 
 // release gives back a reserved slot when a call ends before dispatch.
@@ -194,8 +210,8 @@ func (p *Provider) release() {
 	p.gate.mu.Unlock()
 }
 
-func (p *Provider) dispatch() *Problem {
-	return p.gate.dispatch(p.interval(), time.Duration(p.TimeoutSeconds)*time.Second)
+func (p *Provider) dispatch(b *budget) *Problem {
+	return p.gate.dispatch(p.interval(), time.Until(b.waitUntil))
 }
 
 func (p *Provider) interval() time.Duration {
@@ -203,9 +219,14 @@ func (p *Provider) interval() time.Duration {
 }
 
 // withDeadline starts the upstream timeout once a call has been admitted, so
-// time spent waiting for its pacing slot does not eat into it.
-func (p *Provider) withDeadline(req *http.Request) (*http.Request, context.CancelFunc) {
-	ctx, cancel := context.WithTimeout(req.Context(), time.Duration(p.TimeoutSeconds)*time.Second)
+// time spent waiting for its pacing slot does not eat into it, but never past
+// the end of the API call's budget.
+func (p *Provider) withDeadline(req *http.Request, b *budget) (*http.Request, context.CancelFunc) {
+	deadline := time.Now().Add(time.Duration(p.TimeoutSeconds) * time.Second)
+	if b.end.Before(deadline) {
+		deadline = b.end
+	}
+	ctx, cancel := context.WithDeadline(req.Context(), deadline)
 	return req.WithContext(ctx), cancel
 }
 

@@ -1035,6 +1035,39 @@ func TestPacingWaitDoesNotEatUpstreamTimeout(t *testing.T) {
 	}
 }
 
+func TestPacingWaitIsBoundedPerAPICall(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		jsonOK(w, "a1", "r1")
+	}))
+	defer server.Close()
+	p := providerFor(server.URL)
+	p.TimeoutSeconds = 1
+	p.MinIntervalMS = 700
+	m, _, _ := managerFor(t, p)
+	importOAuth(t, m)
+	if _, err := m.Refresh("alice"); err != nil {
+		t.Fatal(err)
+	}
+	e, _ := m.get("alice")
+	e.mu.Lock()
+	e.state.NextRefresh = time.Now().Add(-time.Second)
+	e.mu.Unlock()
+	// The renewal waits ~700 ms for its slot and the request would need
+	// another ~700 ms: together past the call's 1 s pacing budget, so the
+	// request is refused before it is sent instead of stretching the call.
+	started := time.Now()
+	_, err := m.Request("alice", RequestInput{URL: server.URL + "/me"})
+	wantCode(t, err, "retry_later")
+	if calls.Load() != 2 {
+		t.Fatalf("%d upstream calls", calls.Load())
+	}
+	if elapsed := time.Since(started); elapsed > 1500*time.Millisecond {
+		t.Fatalf("call took %v", elapsed)
+	}
+}
+
 func TestDispatchSpacesCallsThatActuallyLeave(t *testing.T) {
 	const interval = 300 * time.Millisecond
 	g := &gate{}
