@@ -149,6 +149,7 @@ func (g *gate) dispatch(interval, maxWait time.Duration) *Problem {
 		now := time.Now().UTC()
 		if now.Before(g.pausedUntil) {
 			until := g.pausedUntil
+			g.release(interval)
 			g.mu.Unlock()
 			return pausedProblem(until)
 		}
@@ -164,12 +165,22 @@ func (g *gate) dispatch(interval, maxWait time.Duration) *Problem {
 			g.mu.Unlock()
 			return nil
 		}
-		g.mu.Unlock()
 		if now.Add(wait).After(deadline) {
+			g.release(interval)
+			g.mu.Unlock()
 			return intervalProblem(now.Add(wait))
 		}
+		g.mu.Unlock()
 		time.Sleep(wait)
 	}
+}
+
+// release drops outstanding reservations when a call is refused after it
+// reserved a slot, so the slot it never used does not delay later callers.
+// Callers still holding reservations stay spaced by dispatch, which measures
+// from the last call that actually left. Callers hold g.mu.
+func (g *gate) release(interval time.Duration) {
+	g.next = g.last.Add(interval)
 }
 
 func (p *Provider) reserve() *Problem {

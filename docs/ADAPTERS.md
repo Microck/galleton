@@ -157,7 +157,7 @@ POST /v1/providers/vinted/pause
 DELETE /v1/providers/vinted/pause
 ```
 
-While paused, managed requests fail with `provider_paused` and a `retry_at`, the scheduler starts no renewals, and `/headers` serves still-valid credentials without renewing. A call that was already waiting for its turn when the pause was set is refused too, before anything is sent. A pause only extends an existing one (1–86400 seconds per call). It is saved encrypted in the state directory, so a daemon restart keeps it; if saving fails the pause still applies and the call reports `storage_failure`. `GET /v1/providers` shows `paused_until`.
+While paused, managed requests fail with `provider_paused` and a `retry_at`, the scheduler starts no renewals, and `/headers` serves still-valid credentials without renewing. A call that was already waiting for its turn when the pause was set is refused too, before anything is sent; the session stays as it was and the pacing slot it held is released. A pause only extends an existing one (1–86400 seconds per call). It is saved encrypted in the state directory, so a daemon restart keeps it; if saving fails the pause still applies and the call reports `storage_failure`. `GET /v1/providers` shows `paused_until`.
 
 ### Keep-alive
 

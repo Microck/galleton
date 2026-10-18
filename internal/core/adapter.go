@@ -259,11 +259,8 @@ func performRefresh(s *State, p *Provider, client *http.Client, req *http.Reques
 	var connected atomic.Bool
 	trace := &httptrace.ClientTrace{GotConn: func(httptrace.GotConnInfo) { connected.Store(true) }}
 	req = req.WithContext(httptrace.WithClientTrace(req.Context(), trace))
-	// Nothing has been sent yet: a pause set meanwhile, or another call that
-	// left too recently, refuses or delays this one.
-	if wait := p.dispatch(); wait != nil {
-		return wait
-	}
+	// ensure admitted this call through the provider's gate; the upstream
+	// timeout starts now.
 	req, cancel := p.withDeadline(req)
 	defer cancel()
 	resp, err := client.Do(req)

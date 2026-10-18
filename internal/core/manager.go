@@ -498,6 +498,18 @@ func (m *Manager) ensure(e *entry, force bool) error {
 	} // No request was sent.
 	e.state = pending
 	e.publish()
+	if wait := p.dispatch(); wait != nil {
+		// Paused or crowded after the checkpoint: nothing was sent, so the
+		// session returns to its previous state instead of gaining a retry
+		// deadline that would outlive an early resume.
+		if err := m.commit(e, cloneState(s)); err != nil {
+			return err
+		}
+		if !force && credentialsUsable(s, now) {
+			return nil
+		}
+		return wait
+	}
 	result := performRefresh(pending, p, p.renewal, req)
 	pending.PendingRefresh = false
 	pending.Revision++
@@ -516,7 +528,7 @@ func (m *Manager) ensure(e *entry, force bool) error {
 		pending.LastError = result
 		pending.Failures++
 		switch result.Code {
-		case "retry_later", "upstream_blocked", "provider_paused":
+		case "retry_later", "upstream_blocked":
 			pending.Status = "retry_wait"
 			pending.NextRefresh = e.completed.Add(backoff(pending.Failures))
 			if result.RetryAt.After(pending.NextRefresh) {

@@ -930,6 +930,7 @@ func TestPauseStopsCallQueuedBehindInterval(t *testing.T) {
 	}
 	e, _ := m.get("alice")
 	e.state.NextRefresh = time.Now().Add(time.Hour)
+	first := time.Now()
 	if _, err := m.Request("alice", RequestInput{URL: server.URL + "/one"}); err != nil {
 		t.Fatal(err)
 	}
@@ -949,6 +950,60 @@ func TestPauseStopsCallQueuedBehindInterval(t *testing.T) {
 	states, err := v.LoadAll()
 	if err != nil || states[0].PendingRequest {
 		t.Fatalf("refused call left its checkpoint: %v", err)
+	}
+	// The refused call's slot is released: once the interval since the call
+	// that actually left has passed, the next call goes without waiting for
+	// the slot nobody used.
+	if _, err := m.Resume("test"); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(time.Until(first.Add(1700 * time.Millisecond)))
+	started := time.Now()
+	if _, err := m.Request("alice", RequestInput{URL: server.URL + "/three"}); err != nil {
+		t.Fatal(err)
+	}
+	if waited := time.Since(started); waited > 700*time.Millisecond {
+		t.Fatalf("waited %v for a released slot", waited)
+	}
+}
+
+func TestPauseDuringRenewalWaitLeavesNoRetryDeadline(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		jsonOK(w, "a1", "r1")
+	}))
+	defer server.Close()
+	p := providerFor(server.URL)
+	p.MinIntervalMS = 1500
+	m, _, _ := managerFor(t, p)
+	importOAuth(t, m)
+	if _, err := m.Refresh("alice"); err != nil {
+		t.Fatal(err)
+	}
+	queued := make(chan error, 1)
+	go func() {
+		_, err := m.Refresh("alice")
+		queued <- err
+	}()
+	time.Sleep(300 * time.Millisecond)
+	if _, err := m.Pause("test", 600); err != nil {
+		t.Fatal(err)
+	}
+	wantCode(t, <-queued, "provider_paused")
+	meta, _ := m.Status("alice")
+	if meta.Status != "ready" || calls.Load() != 1 {
+		t.Fatalf("refused renewal changed the session: %s, %d calls", meta.Status, calls.Load())
+	}
+	// An early resume lets renewal run again right away.
+	if _, err := m.Resume("test"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Refresh("alice"); err != nil {
+		t.Fatal(err)
+	}
+	if calls.Load() != 2 {
+		t.Fatalf("%d renewals", calls.Load())
 	}
 }
 
