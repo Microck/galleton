@@ -193,13 +193,24 @@ type budget struct {
 	end       time.Time
 }
 
-func (p *Provider) newBudget() *budget {
-	now := time.Now()
+func (p *Provider) newBudget(started time.Time) *budget {
 	timeout := time.Duration(p.TimeoutSeconds) * time.Second
-	return &budget{waitUntil: now.Add(timeout), end: now.Add(2 * timeout)}
+	return &budget{waitUntil: started.Add(timeout), end: started.Add(2 * timeout)}
+}
+
+// spent refuses a call whose budget already ran out, for example while it
+// waited behind another call on the same session.
+func (b *budget) spent() *Problem {
+	if time.Now().Before(b.end) {
+		return nil
+	}
+	return problem(503, "retry_later", "The call ran out of time before it could reach the provider; nothing was sent.")
 }
 
 func (p *Provider) reserve(b *budget) *Problem {
+	if spent := b.spent(); spent != nil {
+		return spent
+	}
 	return p.gate.reserve(p.interval(), time.Until(b.waitUntil))
 }
 
@@ -211,6 +222,10 @@ func (p *Provider) release() {
 }
 
 func (p *Provider) dispatch(b *budget) *Problem {
+	if spent := b.spent(); spent != nil {
+		p.release()
+		return spent
+	}
 	return p.gate.dispatch(p.interval(), time.Until(b.waitUntil))
 }
 

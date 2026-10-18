@@ -453,9 +453,9 @@ func credentialsUsable(s *State, now time.Time) bool {
 	return false
 }
 
-// ensure renews when needed. b is the calling API operation's budget; nil
-// starts a fresh one for a call that does nothing else upstream.
-func (m *Manager) ensure(e *entry, force bool, b *budget) error {
+// ensure renews when needed. started is when the calling API operation began
+// (zero for the scheduler); its budget bounds pacing waits and upstream time.
+func (m *Manager) ensure(e *entry, force bool, started time.Time) error {
 	if m.stopping.Load() {
 		return problem(503, "shutting_down", "The daemon is shutting down; no new renewal was started.")
 	}
@@ -483,9 +483,10 @@ func (m *Manager) ensure(e *entry, force bool, b *budget) error {
 	if p == nil || s.ConfigHash != p.hash {
 		return problem(409, "configuration_error", "Provider configuration does not match the imported session.")
 	}
-	if b == nil {
-		b = p.newBudget()
+	if started.IsZero() {
+		started = time.Now()
 	}
+	b := p.newBudget(started)
 	// A client-set pause or the provider's minimum interval defers renewal
 	// before anything is journaled or sent. Current credentials stay in use.
 	if wait := p.reserve(b); wait != nil {
@@ -584,7 +585,7 @@ func (m *Manager) Refresh(id string) (Metadata, error) {
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if err = m.ensure(e, !e.completed.After(started), nil); err != nil {
+	if err = m.ensure(e, !e.completed.After(started), started); err != nil {
 		return Metadata{}, err
 	}
 	return metadataOf(e), nil
@@ -632,6 +633,7 @@ func (m *Manager) Headers(id, rawURL string) (HeadersResult, error) {
 	if err != nil {
 		return HeadersResult{}, err
 	}
+	started := time.Now() // the call's budget includes waiting for the session
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	p := m.providers[e.state.Provider]
@@ -641,7 +643,7 @@ func (m *Manager) Headers(id, rawURL string) (HeadersResult, error) {
 	if _, err = p.allowed(rawURL); err != nil {
 		return HeadersResult{}, err
 	} // Check scope before any renewal.
-	if err = m.ensure(e, false, nil); err != nil {
+	if err = m.ensure(e, false, started); err != nil {
 		return HeadersResult{}, err
 	}
 	result, err := headersFor(e.state, rawURL)
@@ -712,6 +714,9 @@ func (m *Manager) Request(id string, in RequestInput) (RequestResult, error) {
 	if err != nil {
 		return RequestResult{}, err
 	}
+	// The call's budget starts now, before waiting for the session, so a
+	// request queued behind another one cannot outlive the client's deadline.
+	started := time.Now()
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	p := m.providers[e.state.Provider]
@@ -756,8 +761,8 @@ func (m *Manager) Request(id string, in RequestInput) (RequestResult, error) {
 	}
 	// One budget covers a renewal and the request together, so the API call
 	// cannot outlive the server's response deadline.
-	b := p.newBudget()
-	if err = m.ensure(e, false, b); err != nil {
+	b := p.newBudget(started)
+	if err = m.ensure(e, false, started); err != nil {
 		return RequestResult{}, err
 	}
 	auth, err := headersFor(e.state, u.String())
@@ -895,7 +900,11 @@ func (m *Manager) RunScheduler(ctx context.Context) {
 			select {
 			case sem <- struct{}{}:
 				wg.Add(1)
-				go func(e *entry) { defer wg.Done(); defer func() { <-sem; e.mu.Unlock() }(); _ = m.ensure(e, false, nil) }(e)
+				go func(e *entry) {
+					defer wg.Done()
+					defer func() { <-sem; e.mu.Unlock() }()
+					_ = m.ensure(e, false, time.Time{})
+				}(e)
 			default:
 				e.mu.Unlock()
 			}

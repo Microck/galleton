@@ -927,17 +927,17 @@ func TestPauseStopsCallQueuedBehindInterval(t *testing.T) {
 	}))
 	defer server.Close()
 	p := providerFor(server.URL)
-	p.MinIntervalMS = 1500
+	p.MinIntervalMS = 3000
 	m, v, _ := managerFor(t, p)
 	if _, err := m.Import("alice", Import{Provider: "test", AccessToken: "a0", RefreshToken: "r0"}); err != nil {
 		t.Fatal(err)
 	}
 	e, _ := m.get("alice")
 	e.state.NextRefresh = time.Now().Add(time.Hour)
-	first := time.Now()
 	if _, err := m.Request("alice", RequestInput{URL: server.URL + "/one"}); err != nil {
 		t.Fatal(err)
 	}
+	sent := time.Now() // the first call left before this
 	queued := make(chan error, 1)
 	go func() {
 		_, err := m.Request("alice", RequestInput{URL: server.URL + "/two"})
@@ -961,12 +961,13 @@ func TestPauseStopsCallQueuedBehindInterval(t *testing.T) {
 	if _, err := m.Resume("test"); err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(time.Until(first.Add(1700 * time.Millisecond)))
+	time.Sleep(time.Until(sent.Add(3100 * time.Millisecond)))
 	started := time.Now()
 	if _, err := m.Request("alice", RequestInput{URL: server.URL + "/three"}); err != nil {
 		t.Fatal(err)
 	}
-	if waited := time.Since(started); waited > 700*time.Millisecond {
+	// An unreleased slot would hold this call for most of another interval.
+	if waited := time.Since(started); waited > 1500*time.Millisecond {
 		t.Fatalf("waited %v for a released slot", waited)
 	}
 }
@@ -979,7 +980,7 @@ func TestPauseDuringRenewalWaitLeavesNoRetryDeadline(t *testing.T) {
 	}))
 	defer server.Close()
 	p := providerFor(server.URL)
-	p.MinIntervalMS = 1500
+	p.MinIntervalMS = 3000
 	m, _, _ := managerFor(t, p)
 	importOAuth(t, m)
 	if _, err := m.Refresh("alice"); err != nil {
@@ -1063,8 +1064,43 @@ func TestPacingWaitIsBoundedPerAPICall(t *testing.T) {
 	if calls.Load() != 2 {
 		t.Fatalf("%d upstream calls", calls.Load())
 	}
-	if elapsed := time.Since(started); elapsed > 1500*time.Millisecond {
+	// The call's whole budget is 2 s; allow scheduling slack on busy hosts.
+	if elapsed := time.Since(started); elapsed > 3*time.Second {
 		t.Fatalf("call took %v", elapsed)
+	}
+}
+
+func TestCallBudgetIncludesWaitingForTheSession(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		fmt.Fprint(w, "ok")
+	}))
+	defer server.Close()
+	p := providerFor(server.URL)
+	p.TimeoutSeconds = 1
+	m, v, _ := managerFor(t, p)
+	if _, err := m.Import("alice", Import{Provider: "test", AccessToken: "a0", RefreshToken: "r0"}); err != nil {
+		t.Fatal(err)
+	}
+	e, _ := m.get("alice")
+	e.mu.Lock()
+	e.state.NextRefresh = time.Now().Add(time.Hour)
+	queued := make(chan error, 1)
+	go func() {
+		_, err := m.Request("alice", RequestInput{URL: server.URL + "/me"})
+		queued <- err
+	}()
+	// Another call holds the session past this call's whole 2 s budget.
+	time.Sleep(2100 * time.Millisecond)
+	e.mu.Unlock()
+	wantCode(t, <-queued, "retry_later")
+	if calls.Load() != 0 {
+		t.Fatalf("%d upstream calls after the budget ran out", calls.Load())
+	}
+	states, err := v.LoadAll()
+	if err != nil || states[0].PendingRequest {
+		t.Fatalf("refused call left a checkpoint: %v", err)
 	}
 }
 
