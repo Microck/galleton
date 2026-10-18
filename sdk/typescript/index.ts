@@ -1,9 +1,16 @@
 /** Server-side client for an authenticated, loopback-only Galleton daemon. */
+export interface ImportCookie {
+  name: string; value: string; domain?: string; host_only?: boolean; path?: string;
+  expires?: string; secure?: boolean; http_only?: boolean; same_site?: string;
+}
 export interface Credentials {
   provider: string;
   cookie_origin?: string;
   cookie_header?: string;
   set_cookies?: string[];
+  cookies?: ImportCookie[];
+  cookie_text?: string;
+  cookie_format?: "auto" | "netscape" | "json" | "header" | "set-cookie" | "har";
   access_token?: string;
   refresh_token?: string;
   access_expires_at?: string;
@@ -16,6 +23,9 @@ export interface SessionStatus {
   id: string; provider: string; status: string; revision: number;
   created_at: string; last_refresh?: string; next_refresh?: string;
   access_expires_at?: string; cookie_count: number; error?: Problem;
+}
+export interface ProviderInfo {
+  name: string; kind: string; origins: string[]; proxied: boolean; paused_until?: string;
 }
 export class GalletonError extends Error {
   constructor(public readonly code: string, message: string,
@@ -48,10 +58,11 @@ function encode64(bytes: Uint8Array): string {
 function decode64(value: string): Uint8Array {
   return Uint8Array.from(atob(value), char => char.charCodeAt(0));
 }
-function sessionPath(id: string): string {
-  if (!/^[A-Za-z0-9_-]{1,64}$/.test(id)) throw new TypeError("Invalid session ID");
-  return `/v1/sessions/${id}`;
+function checkName(value: string, label: string): string {
+  if (!/^[A-Za-z0-9_-]{1,64}$/.test(value)) throw new TypeError(`Invalid ${label}`);
+  return value;
 }
+function sessionPath(id: string): string { return `/v1/sessions/${checkName(id, "session ID")}`; }
 async function responseText(response: Response): Promise<string> {
   const reader = response.body?.getReader();
   if (!reader) return "";
@@ -63,7 +74,7 @@ async function responseText(response: Response): Promise<string> {
       const { done, value } = await reader.read();
       if (done) break;
       size += value.byteLength;
-      if (size > 8 * 1024 * 1024) {
+      if (size > 128 * 1024 * 1024) {
         await reader.cancel().catch(() => {});
         throw new GalletonError("invalid_response", "Oversized daemon response.", response.status);
       }
@@ -140,6 +151,18 @@ export class Galleton {
     return this.call("POST", sessionPath(id) + "/cookies", { url, set_cookie: setCookie });
   }
   async forget(id: string): Promise<void> { await this.call("DELETE", sessionPath(id)); }
+  async providers(): Promise<ProviderInfo[]> {
+    return (await this.call<{ providers: ProviderInfo[] }>("GET", "/v1/providers")).providers;
+  }
+  /** Pauses managed requests and renewals for a provider; only extends an existing pause. */
+  pause(provider: string, seconds: number): Promise<{ provider: string; paused_until: string }> {
+    const path = `/v1/providers/${checkName(provider, "provider name")}/pause`;
+    if (!Number.isInteger(seconds) || seconds < 1 || seconds > 86400) throw new TypeError("Invalid pause seconds");
+    return this.call("POST", path, { seconds });
+  }
+  resume(provider: string): Promise<{ provider: string }> {
+    return this.call("DELETE", `/v1/providers/${checkName(provider, "provider name")}/pause`);
+  }
   /** Buffered request with automatic Cookie/Authorization injection and Set-Cookie capture.
    *  Resource calls are never automatically retried. Non-2xx upstream statuses are returned. */
   async request(id: string, url: string, options: RequestOptions = {}): Promise<ManagedResponse> {
@@ -154,7 +177,7 @@ export class Galleton {
       headers["Content-Type"] = "application/json";
     }
     const bytes = typeof body === "string" ? new TextEncoder().encode(body) : body ?? new Uint8Array();
-    if (bytes.length > 1024 * 1024) throw new TypeError("Request body exceeds 1 MiB");
+    if (bytes.length > 64 * 1024 * 1024) throw new TypeError("Request body exceeds 64 MiB");
     const wire = await this.call<{
       status: number; headers: Record<string, string[]>; body_base64: string; revision: number;
     }>("POST", sessionPath(id) + "/request", {

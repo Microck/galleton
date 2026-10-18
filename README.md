@@ -90,13 +90,28 @@ start with [the adapter template](examples/adapters.template.json). its endpoint
 
 cookie adapters require an endpoint that returns replacement `Set-Cookie` values. for OAuth adapters, a refresh token issued for the registered client is required; an access token alone is not enough. see the [adapter reference](docs/ADAPTERS.md) for supported fields and templates.
 
-import real credentials through a protected onboarding flow or stdin. do not put them in shell history, committed files, or logs.
+every provider can opt into a few extras, all off by default:
+
+- an egress `proxy` (http, https, socks5, socks5h) that fails closed and never falls back to a direct connection
+- `block_signatures`, so a bot-protection challenge page means "try later" instead of "log in again"
+- a `cookie_domain` shared by listed origins, `protected_cookies` that only renewal may replace, and a JWT `sub` check
+- `min_interval_ms` between upstream calls, plus a pause any client can set with `POST /v1/providers/{name}/pause`
+- `keep_alive` for managed requests and per-adapter request/response size limits
+- `authorization` styles: bearer access token, cookies only, or a cookie sent as a bearer token
+
+[`examples/adapters.vinted.json`](examples/adapters.vinted.json) uses most of them for a Vinted web session.
+
+import real credentials through a protected onboarding flow or stdin. do not put them in shell history, committed files, or logs. `connect` also reads browser cookie exports: Netscape `cookies.txt`, Cookie-Editor / EditThisCookie / DevTools JSON, a `Cookie:` header, `Set-Cookie` lines, or a HAR file. the format is detected, `--format` overrides it, and cookies outside the provider's origins are dropped:
+
+```sh
+./bin/galleton connect --dir ./state --provider vinted --cookies ./cookies.txt account
+```
 
 ## security and limits
 
 the daemon binds to literal loopback addresses and requires a local bearer token. it encrypts stored credentials with AES-256-GCM. the default key and data are stored together, so restrict the state directory to its owning OS user. the daemon token has administrator-level access to all profiles.
 
-managed requests are buffered, limited to 1 MiB request bodies and 4 MiB responses, and are not automatically retried. restarting with an unfinished rotation checkpoint pauses that session for review instead of replaying a potentially consumed token. the daemon does not provide multi-tenant access control, streaming, browser-equivalent cookie behavior, or protection from other local processes running as the same user.
+managed requests are buffered, limited by default to 1 MiB request bodies and 4 MiB responses (adapters can raise both to 64 MiB), and are not automatically retried. restarting with an unfinished rotation checkpoint pauses that session for review instead of replaying a potentially consumed token. the daemon does not provide multi-tenant access control, streaming, browser-equivalent cookie behavior, or protection from other local processes running as the same user.
 
 see [SECURITY.md](SECURITY.md) for the full security model and limitations.
 

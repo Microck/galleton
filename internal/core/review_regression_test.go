@@ -192,7 +192,7 @@ func TestAbsentTimestampsOmittedAndPresentValuesRoundTrip(t *testing.T) {
 }
 
 func TestUpstreamHeaderWaitUsesRequestContext(t *testing.T) {
-	transport := newUpstreamClient().Transport.(*http.Transport)
+	transport := newUpstreamClient(nil, true).Transport.(*http.Transport)
 	if transport.ResponseHeaderTimeout != 0 { t.Fatal("shared transport overrides provider context timeout") }
 }
 

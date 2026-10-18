@@ -45,10 +45,17 @@ class Response:
         return json.loads(self.body)
 
 
+_RESPONSE_LIMIT = 128 * 1024 * 1024
+
+
+def _name(value: str, label: str) -> str:
+    if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", value):
+        raise ValueError("Invalid " + label)
+    return value
+
+
 def _path(session_id: str) -> str:
-    if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", session_id):
-        raise ValueError("Invalid session ID")
-    return "/v1/sessions/" + session_id
+    return "/v1/sessions/" + _name(session_id, "session ID")
 
 
 class Galleton:
@@ -96,19 +103,19 @@ class Galleton:
                     declared_length = -1
         try:
             with response:
-                raw = response.read(8 * 1024 * 1024 + 1)
+                raw = response.read(_RESPONSE_LIMIT + 1)
         except (HTTPException, URLError, TimeoutError, OSError):
             raise GalletonError(
                 "daemon_unavailable",
                 "Galleton response was interrupted; the request may already have completed.",
                 status,
             ) from None
-        if len(raw) > 8 * 1024 * 1024:
+        if len(raw) > _RESPONSE_LIMIT:
             raise GalletonError("invalid_response", "Oversized daemon response.", status)
         if declared_length is not None:
             if declared_length < 0:
                 raise GalletonError("invalid_response", "Invalid Content-Length in daemon response.", status)
-            if declared_length > 8 * 1024 * 1024:
+            if declared_length > _RESPONSE_LIMIT:
                 raise GalletonError("invalid_response", "Oversized daemon response.", status)
             if len(raw) < declared_length:
                 raise GalletonError(
@@ -130,6 +137,7 @@ class Galleton:
         return payload
 
     def connect(self, session_id: str, credentials: Mapping[str, Any]) -> dict[str, Any]:
+        """Import credentials; supports cookies, cookie_text and cookie_format fields."""
         return self._call("PUT", _path(session_id), dict(credentials))
 
     def status(self, session_id: str) -> dict[str, Any]:
@@ -150,6 +158,19 @@ class Galleton:
     def forget(self, session_id: str) -> None:
         self._call("DELETE", _path(session_id))
 
+    def providers(self) -> list[dict[str, Any]]:
+        return self._call("GET", "/v1/providers")["providers"]
+
+    def pause(self, provider: str, seconds: int) -> dict[str, Any]:
+        """Pause managed requests and renewals for a provider; only extends an existing pause."""
+        path = "/v1/providers/" + _name(provider, "provider name") + "/pause"
+        if isinstance(seconds, bool) or not isinstance(seconds, int) or not 1 <= seconds <= 86400:
+            raise ValueError("Invalid pause seconds")
+        return self._call("POST", path, {"seconds": seconds})
+
+    def resume(self, provider: str) -> dict[str, Any]:
+        return self._call("DELETE", "/v1/providers/" + _name(provider, "provider name") + "/pause")
+
     def request(self, session_id: str, url: str, *, method: str = "GET",
                 headers: Mapping[str, str] | None = None, body: str | bytes | None = None) -> Response:
         """Buffer a request through the daemon, capturing replacement cookies.
@@ -158,8 +179,8 @@ class Galleton:
         Use headers()/capture() for streaming or an existing HTTP transport.
         """
         raw = body.encode() if isinstance(body, str) else body or b""
-        if len(raw) > 1024 * 1024:
-            raise ValueError("Request body exceeds 1 MiB")
+        if len(raw) > 64 * 1024 * 1024:
+            raise ValueError("Request body exceeds 64 MiB")
         data = self._call("POST", _path(session_id) + "/request", {
             "url": url, "method": method, "headers": dict(headers or {}),
             "body_base64": base64.b64encode(raw).decode("ascii")})

@@ -3,11 +3,9 @@ package core
 import (
 	"bytes"
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"io"
-	"net"
 	"net/http"
 	"net/http/httptrace"
 	"net/url"
@@ -16,15 +14,6 @@ import (
 	"sync/atomic"
 	"time"
 )
-
-func newUpstreamClient() *http.Client {
-	// No environment proxy, redirects, or reused connections. In particular, do
-	// not let the transport invisibly replay a refresh on a reused connection.
-	return &http.Client{
-		Transport:     &http.Transport{Proxy: nil, DialContext: (&net.Dialer{Timeout: 10 * time.Second}).DialContext, TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12}, TLSHandshakeTimeout: 10 * time.Second, MaxResponseHeaderBytes: 64 << 10, DisableKeepAlives: true},
-		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
-	}
-}
 
 func substitute(input string, s *State, p *Provider, u *url.URL) (string, error) {
 	var out strings.Builder
@@ -270,6 +259,7 @@ func performRefresh(s *State, p *Provider, client *http.Client, req *http.Reques
 	var connected atomic.Bool
 	trace := &httptrace.ClientTrace{GotConn: func(httptrace.GotConnInfo) { connected.Store(true) }}
 	req = req.WithContext(httptrace.WithClientTrace(req.Context(), trace))
+	p.markSent()
 	resp, err := client.Do(req)
 	if err != nil {
 		if !connected.Load() {
@@ -279,16 +269,22 @@ func performRefresh(s *State, p *Provider, client *http.Client, req *http.Reques
 	}
 	defer resp.Body.Close()
 	now := time.Now().UTC()
+	success2xx := resp.StatusCode >= 200 && resp.StatusCode < 300
 	retained := 0
 	var cookieProblem *Problem
+	before := s.Cookies
 	if lines := resp.Header.Values("Set-Cookie"); len(lines) > 0 {
 		cookies, rejected := parseSetCookiesPartial(lines)
 		if rejected {
 			cookieProblem = problem(502, "protocol_error", "The provider returned an invalid or unsupported cookie rotation.")
 		}
+		if !success2xx {
+			// Only a successful renewal may replace protected credential cookies.
+			cookies = withoutProtected(cookies, p.protected)
+		}
 		if len(cookies) > 0 {
 			var updated []StoredCookie
-			updated, accepted, nextRetained, cookieErr := updateCookies(s.Cookies, req.URL, cookies, now)
+			updated, accepted, nextRetained, cookieErr := updateCookiesIn(s.Cookies, req.URL, cookies, now, p.cookieDomain)
 			if cookieErr != nil {
 				cookieProblem = problem(502, "protocol_error", "The provider returned more cookies than the session limit.")
 			} else {
@@ -300,11 +296,28 @@ func performRefresh(s *State, p *Provider, client *http.Client, req *http.Reques
 			}
 		}
 	}
+	if p.JWTSubjectCookie != "" && s.Subject != "" {
+		if sub, found, ok := cookieSubject(s.Cookies, p.JWTSubjectCookie); found && (!ok || sub != s.Subject) {
+			// A guest or foreign token must not replace the imported account's.
+			s.Cookies = before
+			return problem(401, "reauth_required", "The provider issued credentials for a different account subject; the imported credentials were kept. Reconnect this session.")
+		}
+	}
 	raw, readErr := io.ReadAll(io.LimitReader(resp.Body, (1<<20)+1))
 	if readErr != nil || len(raw) > 1<<20 {
 		return transientOrUncertain(p)
 	}
 	doc, jsonErr := parseJSON(raw)
+	if !success2xx {
+		code, _ := tokenAt(doc, "/error")
+		if !(p.Kind == "oauth2" && code == "invalid_grant") && p.blocked(resp, raw, jsonErr == nil) {
+			// A challenge page from a bot-protection layer: the request did not
+			// reach the session logic, so the credential is still unspent.
+			e := problem(503, "upstream_blocked", "The provider's bot protection refused renewal; credentials were kept and renewal will retry after backoff.")
+			e.RetryAt = parseRetryAfter(resp.Header.Get("Retry-After"), now)
+			return e
+		}
+	}
 	if resp.StatusCode == 429 {
 		e := problem(503, "retry_later", "The provider rate-limited renewal.")
 		e.RetryAt = parseRetryAfter(resp.Header.Get("Retry-After"), now)

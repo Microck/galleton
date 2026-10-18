@@ -15,9 +15,9 @@ This table is a historical snapshot from preparation of the initial GitHub PR, n
 
 Local tools: Go 1.23.2, Node 22.16.0, Python 3.13.5. This is a record of the local run, not a recommendation to deploy old toolchains.
 
-The integration test imports OAuth and cookie credentials once, uses both Python and compiled TypeScript clients, continues beyond the original 12-second refresh/cookie lifetimes, restarts the daemon without reimporting, checks origin restrictions, verifies credential-free CLI metadata, and checks that session files contain no plaintext demo credentials. All accounts are synthetic loopback-only fixtures.
+The integration test imports OAuth credentials and a Netscape `cookies.txt` export (through the CLI) once, uses both Python and compiled TypeScript clients, pauses and resumes a provider through the API, continues beyond the original 12-second refresh/cookie lifetimes, restarts the daemon without reimporting, checks origin restrictions, verifies credential-free CLI metadata, and checks that session files contain no plaintext demo credentials. All accounts are synthetic loopback-only fixtures.
 
-The Go suite also covers concurrent refresh coordination, terminal provider refusals, rate limits, lost responses, crash checkpoints, failed local writes, cookie scope/deletion, configuration changes, vault authentication, profile isolation, shutdown, safe connection-failure recovery, and compatibility with the earlier encrypted format.
+The Go suite also covers concurrent refresh coordination, terminal provider refusals, rate limits, lost responses, crash checkpoints, failed local writes, cookie scope/deletion, configuration changes, vault authentication, profile isolation, shutdown, safe connection-failure recovery, and compatibility with the earlier encrypted format. Provider options are covered by local fixtures: HTTP and SOCKS5h proxies (including fail-closed behavior), block signatures, `cookie_domain` scoping, protected cookies, JWT subject checks, authorization styles, size limits, pacing, pauses, keep-alive connection reuse, every cookie export format, and the Vinted example adapter against a synthetic TLS server. No live Vinted endpoint was contacted.
 
 ## Remote verification
 

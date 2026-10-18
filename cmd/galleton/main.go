@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"github.com/Microck/galleton/client"
+	"github.com/Microck/galleton/cookiefile"
 	"github.com/Microck/galleton/internal/core"
 	"io"
 	"net"
@@ -25,7 +26,7 @@ func main() {
 }
 func run(args []string) error {
 	if len(args) == 0 || args[0] == "help" || args[0] == "--help" {
-		fmt.Println("Galleton " + core.Version + "\n\nCommands: init, serve, shutdown, connect, status, list, refresh, forget, headers, request, version\n\nFlags follow the command, BEFORE positional IDs.\n  galleton init --dir ./state\n  galleton serve --dir ./state --config ./adapters.json\n  galleton connect --dir ./state account < credentials.json\n  galleton status --dir ./state account\n\nThe daemon listens on 127.0.0.1:8766. See README.md for adapters and SDKs.")
+		fmt.Println("Galleton " + core.Version + "\n\nCommands: init, serve, shutdown, connect, status, list, refresh, forget, headers, request, providers, pause, resume, version\n\nFlags follow the command, BEFORE positional IDs.\n  galleton init --dir ./state\n  galleton serve --dir ./state --config ./adapters.json\n  galleton connect --dir ./state account < credentials.json\n  galleton connect --dir ./state --provider vinted --cookies cookies.txt account\n  galleton status --dir ./state account\n  galleton pause --dir ./state --seconds 900 vinted\n\nconnect --cookies reads a cookie export: Netscape cookies.txt, Cookie-Editor,\nEditThisCookie or DevTools JSON, a Cookie header, Set-Cookie lines or a HAR\nfile. The format is detected; override it with --format.\n\nThe daemon listens on 127.0.0.1:8766. See README.md for adapters and SDKs.")
 		return nil
 	}
 	if args[0] == "version" {
@@ -40,6 +41,14 @@ func run(args []string) error {
 	config := f.String("config", "", "provider configuration JSON (serve)")
 	rawURL := f.String("url", "", "upstream URL (headers or request)")
 	method := f.String("method", "GET", "upstream method (request)")
+	provider := f.String("provider", "", "provider name (connect --cookies)")
+	cookies := f.String("cookies", "", "cookie export file, or - for stdin (connect)")
+	format := f.String("format", "auto", "cookie export format: auto, netscape, json, header, set-cookie or har (connect)")
+	cookieOrigin := f.String("cookie-origin", "", "origin for cookies without a domain (connect)")
+	credentials := f.String("credentials", "", "credentials JSON file instead of stdin (connect)")
+	replace := f.Bool("replace", false, "reconnect an existing session; needs --expected-revision (connect --cookies)")
+	expectedRevision := f.Uint64("expected-revision", 0, "current session revision when replacing (connect --cookies)")
+	seconds := f.Int("seconds", 0, "pause length in seconds, 1-86400 (pause)")
 	if err := f.Parse(args[1:]); err != nil {
 		return err
 	}
@@ -123,22 +132,49 @@ func run(args []string) error {
 	} else if args[0] == "shutdown" {
 		err = c.Shutdown(ctx)
 		out = map[string]bool{"stopping": err == nil}
+	} else if args[0] == "providers" {
+		out, err = c.Providers(ctx)
 	} else {
 		if f.NArg() != 1 {
-			return errors.New("provide one session ID after all flags")
+			return errors.New("provide one session ID (or provider name) after all flags")
 		}
 		id := f.Arg(0)
 		switch args[0] {
+		case "pause":
+			out, err = c.Pause(ctx, id, *seconds)
+		case "resume":
+			out, err = c.Resume(ctx, id)
 		case "connect":
 			var input client.Credentials
-			d := json.NewDecoder(io.LimitReader(os.Stdin, 2<<20))
-			d.DisallowUnknownFields()
-			if err = d.Decode(&input); err != nil {
-				return errors.New("connect reads one credentials JSON object from stdin")
+			if *cookies == "" || *credentials != "" {
+				input, err = readCredentials(*credentials)
+				if err != nil {
+					return err
+				}
 			}
-			var extra any
-			if d.Decode(&extra) != io.EOF {
-				return errors.New("only one credentials JSON object is accepted")
+			if *provider != "" {
+				input.Provider = *provider
+			}
+			if *cookieOrigin != "" {
+				input.CookieOrigin = *cookieOrigin
+			}
+			if *replace {
+				if *expectedRevision == 0 {
+					return errors.New("--replace needs --expected-revision; read it with galleton status")
+				}
+				input.Replace = true
+				input.ExpectedRevision = expectedRevision
+			}
+			if *cookies != "" {
+				parsed, used, err := readCookies(*cookies, *format)
+				if err != nil {
+					return err
+				}
+				input.Cookies = append(input.Cookies, parsed...)
+				fmt.Fprintf(os.Stderr, "Parsed %d cookies (%s); the daemon keeps only those for the provider's origins.\n", len(parsed), used)
+			}
+			if input.Provider == "" {
+				return errors.New("connect needs a provider: use --provider or a credentials JSON object")
 			}
 			out, err = c.Connect(ctx, id, input)
 		case "status":
@@ -164,4 +200,54 @@ func run(args []string) error {
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
 	return enc.Encode(out)
+}
+
+// readCredentials decodes one credentials JSON object from path, or stdin.
+func readCredentials(path string) (client.Credentials, error) {
+	var input client.Credentials
+	var source io.Reader = os.Stdin
+	if path != "" {
+		file, err := os.Open(path)
+		if err != nil {
+			return input, err
+		}
+		defer file.Close()
+		source = file
+	}
+	d := json.NewDecoder(io.LimitReader(source, 2<<20))
+	d.DisallowUnknownFields()
+	if err := d.Decode(&input); err != nil {
+		return input, errors.New("connect reads one credentials JSON object from stdin or --credentials")
+	}
+	var extra any
+	if d.Decode(&extra) != io.EOF {
+		return input, errors.New("only one credentials JSON object is accepted")
+	}
+	return input, nil
+}
+
+// readCookies parses a cookie export locally, so large HAR files never cross
+// the API; only the structured cookies are sent to the daemon.
+func readCookies(path, format string) ([]cookiefile.Cookie, string, error) {
+	var source io.Reader = os.Stdin
+	if path != "-" {
+		file, err := os.Open(path)
+		if err != nil {
+			return nil, "", err
+		}
+		defer file.Close()
+		source = file
+	}
+	data, err := io.ReadAll(io.LimitReader(source, (256<<20)+1))
+	if err != nil {
+		return nil, "", err
+	}
+	if len(data) > 256<<20 {
+		return nil, "", errors.New("cookie export exceeds 256 MiB")
+	}
+	cookies, used, err := cookiefile.Parse(data, format, time.Now())
+	if err != nil {
+		return nil, used, fmt.Errorf("cookie export: %w", err)
+	}
+	return cookies, used, nil
 }

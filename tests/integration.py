@@ -80,11 +80,31 @@ def main():
             client = Galleton.from_dir(state_dir, api_url)
             eventually(lambda: client.list() == [])
             client.connect("oauth-account", {"provider": "oauth", "refresh_token": "demo-refresh-0"})
-            client.connect("cookie-account", {"provider": "cookie", "cookie_origin": provider_url, "cookie_header": "sid=demo-cookie-0"})
-            checks.append("one-time import of OAuth and cookie credentials")
+            cookies_txt = base / "cookies.txt"
+            cookies_txt.write_text("# Netscape HTTP Cookie File\n"
+                                   "#HttpOnly_127.0.0.1\tFALSE\t/\tFALSE\t0\tsid\tdemo-cookie-0\n"
+                                   ".unrelated.example\tTRUE\t/\tTRUE\t0\tforeign\tnot-for-this-provider\n")
+            connected = subprocess.run(
+                [str(daemon_exe), "connect", "--dir", str(state_dir), "--api", api_url,
+                 "--provider", "cookie", "--cookies", str(cookies_txt), "cookie-account"],
+                capture_output=True, text=True, check=True,
+            )
+            assert json.loads(connected.stdout)["cookie_count"] == 1
+            assert "demo-cookie" not in connected.stdout + connected.stderr
+            checks.append("one-time import of OAuth credentials and a cookies.txt export through the CLI")
             for account in ["oauth-account", "cookie-account"]:
                 assert client.request(account, provider_url + "/me").json()["ok"]
             checks.append("Python SDK managed requests authenticate")
+            client.pause("cookie", 60)
+            try:
+                client.request("cookie-account", provider_url + "/me")
+                raise AssertionError("paused provider served a managed request")
+            except GalletonError as exc:
+                assert exc.code == "provider_paused" and exc.retry_at
+            assert any(p.get("paused_until") for p in client.providers() if p["name"] == "cookie")
+            client.resume("cookie")
+            assert client.request("cookie-account", provider_url + "/me").json()["ok"]
+            checks.append("provider pause set and cleared through the API holds managed requests")
             script = '''
 import { Galleton } from "./sdk/typescript/dist/index.js";
 const client = new Galleton({ token: process.env.LOCAL_TEST_TOKEN, baseURL: process.env.LOCAL_TEST_API });

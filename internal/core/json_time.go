@@ -47,3 +47,19 @@ func (h HeadersResult) MarshalJSON() ([]byte, error) {
 		ExpiresAt *time.Time `json:"expires_at,omitempty"`
 	}{(*plain)(&h), optionalTime(h.ExpiresAt)})
 }
+
+func (p ProviderInfo) MarshalJSON() ([]byte, error) {
+	type plain ProviderInfo
+	return json.Marshal(struct {
+		*plain
+		PausedUntil *time.Time `json:"paused_until,omitempty"`
+	}{(*plain)(&p), optionalTime(p.PausedUntil)})
+}
+
+func (p ProviderPause) MarshalJSON() ([]byte, error) {
+	type plain ProviderPause
+	return json.Marshal(struct {
+		*plain
+		PausedUntil *time.Time `json:"paused_until,omitempty"`
+	}{(*plain)(&p), optionalTime(p.PausedUntil)})
+}
