@@ -16,8 +16,6 @@ export interface Credentials {
     cookie_header?: string;
     set_cookies?: string[];
     cookies?: ImportCookie[];
-    cookie_text?: string;
-    cookie_format?: "auto" | "netscape" | "json" | "header" | "set-cookie" | "har";
     access_token?: string;
     refresh_token?: string;
     access_expires_at?: string;

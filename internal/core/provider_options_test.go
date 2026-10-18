@@ -2,6 +2,7 @@ package core
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/tls"
 	"encoding/base64"
@@ -9,26 +10,24 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/Microck/galleton/cookiefile"
 )
 
 // Every credential in this file is synthetic.
-
-func fakeJWT(sub string) string {
-	enc := base64.RawURLEncoding
-	payload, _ := json.Marshal(map[string]any{"sub": sub, "exp": time.Now().Add(time.Hour).Unix()})
-	return enc.EncodeToString([]byte(`{"alg":"none"}`)) + "." + enc.EncodeToString(payload) + ".c2ln"
-}
 
 func cookieProvider(raw string) Provider {
 	p := providerFor(raw)
@@ -532,10 +531,6 @@ func TestCookieDomainConfigValidation(t *testing.T) {
 	if _, err := compileProviders(Config{Providers: []Provider{p}}); err != nil {
 		t.Fatal(err)
 	}
-	p.JWTSubjectCookie = "access"
-	if _, err := compileProviders(Config{Providers: []Provider{p}}); err == nil {
-		t.Fatal("jwt_subject_cookie outside protected_cookies accepted")
-	}
 }
 
 func TestProtectedCookiesOnlyRenewalMaySet(t *testing.T) {
@@ -581,73 +576,62 @@ func TestProtectedCookiesOnlyRenewalMaySet(t *testing.T) {
 	}
 }
 
-func TestJWTSubjectMustMatchImportedAccount(t *testing.T) {
-	var sub atomic.Value
-	sub.Store("1001")
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.SetCookie(w, &http.Cookie{Name: "access", Value: fakeJWT(sub.Load().(string)), Path: "/"})
-		fmt.Fprint(w, `{}`)
-	}))
-	defer server.Close()
-	p := cookieProvider(server.URL)
-	p.ProtectedCookies = []string{"access"}
-	p.JWTSubjectCookie = "access"
-	m, v, _ := managerFor(t, p)
-	_, err := m.Import("alice", Import{Provider: "test", CookieOrigin: server.URL, CookieHeader: "access=not-a-jwt"})
-	wantCode(t, err, "invalid_request")
-	imported := fakeJWT("1001")
-	if _, err := m.Import("alice", Import{Provider: "test", CookieOrigin: server.URL, CookieHeader: "access=" + imported}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := m.Refresh("alice"); err != nil {
-		t.Fatal(err)
-	}
-	sub.Store("guest-42")
-	_, err = m.Refresh("alice")
-	wantCode(t, err, "reauth_required")
-	states, _ := v.LoadAll()
-	for _, c := range states[0].Cookies {
-		if s, _ := jwtSubject(c.Cookie.Value); c.Cookie.Name == "access" && s != "1001" {
-			t.Fatal("foreign-subject token replaced the imported one")
-		}
-	}
-	metadata, _ := json.Marshal(states[0].metadata())
-	if strings.Contains(string(metadata), "1001") {
-		t.Fatal("subject leaked into metadata")
+func TestRequireSetCookieNeedsEveryProtectedCookieReplaced(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		set     []*http.Cookie
+		wantErr bool
+	}{
+		{"unrelated cookie only", []*http.Cookie{{Name: "datadome", Value: "d1", Path: "/"}}, true},
+		{"one of two", []*http.Cookie{{Name: "datadome", Value: "d1", Path: "/"}, {Name: "refresh", Value: "r1", Path: "/"}}, true},
+		{"deletion is not a replacement", []*http.Cookie{{Name: "access", Value: "a1", Path: "/"}, {Name: "refresh", Value: "", Path: "/", MaxAge: -1}}, true},
+		{"both rotated", []*http.Cookie{{Name: "access", Value: "a1", Path: "/"}, {Name: "refresh", Value: "r1", Path: "/"}}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var calls atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls.Add(1)
+				for _, c := range tc.set {
+					http.SetCookie(w, c)
+				}
+				fmt.Fprint(w, `{}`)
+			}))
+			defer server.Close()
+			p := cookieProvider(server.URL)
+			p.ProtectedCookies = []string{"access", "refresh"}
+			m, _, _ := managerFor(t, p)
+			if _, err := m.Import("alice", Import{Provider: "test", CookieOrigin: server.URL, CookieHeader: "access=a0; refresh=r0"}); err != nil {
+				t.Fatal(err)
+			}
+			_, err := m.Refresh("alice")
+			if !tc.wantErr {
+				if err != nil {
+					t.Fatal(err)
+				}
+				return
+			}
+			// The session stops instead of replaying a refresh cookie that the
+			// provider may already have consumed.
+			wantCode(t, err, "protocol_error")
+			_, err = m.Refresh("alice")
+			wantCode(t, err, "protocol_error")
+			if calls.Load() != 1 {
+				t.Fatalf("%d renewals after an incomplete rotation", calls.Load())
+			}
+		})
 	}
 }
 
-func TestAuthorizationStyles(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
-	defer server.Close()
-	for _, tc := range []struct{ style, cookie, want string }{
-		{"", "", "Bearer a0"},
-		{"bearer", "", "Bearer a0"},
-		{"none", "", ""},
-		{"cookie_bearer", "access", "Bearer from-cookie"},
-	} {
-		p := cookieProvider(server.URL)
-		p.Authorization, p.AuthorizationCookie = tc.style, tc.cookie
-		m, _, _ := managerFor(t, p)
-		if _, err := m.Import("alice", Import{Provider: "test", AccessToken: "a0", CookieOrigin: server.URL, CookieHeader: "access=from-cookie"}); err != nil {
-			t.Fatal(err)
-		}
-		e, _ := m.get("alice")
-		e.state.NextRefresh = time.Now().Add(time.Hour)
-		h, err := m.Headers("alice", server.URL+"/me")
-		if err != nil || h.Headers["Authorization"] != tc.want {
-			t.Fatalf("%s: %v %#v", tc.style, err, h)
-		}
-	}
-	bad := providerFor(server.URL)
-	bad.Authorization = "none"
-	if _, err := compileProviders(Config{Providers: []Provider{bad}}); err == nil {
-		t.Fatal("oauth2 accepted a non-bearer authorization style")
-	}
-	bad = cookieProvider(server.URL)
-	bad.Authorization = "cookie_bearer"
-	if _, err := compileProviders(Config{Providers: []Provider{bad}}); err == nil {
-		t.Fatal("cookie_bearer without authorization_cookie accepted")
+func TestHostPrefixedImportCannotDropItsDomain(t *testing.T) {
+	p := cookieProvider("https://www.example.test")
+	p.AllowHTTPLoopback = false
+	m, _, _ := managerFor(t, p)
+	// A __Host- cookie may not carry a Domain; a structured export claiming a
+	// parent domain must not be laundered into a host-only cookie.
+	_, err := m.Import("alice", Import{Provider: "test", Cookies: []ImportCookie{{Name: "__Host-sid", Value: "x", Domain: "example.test", Path: "/", Secure: true}}})
+	wantCode(t, err, "invalid_request")
+	if _, err := m.Import("bob", Import{Provider: "test", Cookies: []ImportCookie{{Name: "__Host-sid", Value: "x", Domain: "www.example.test", HostOnly: true, Path: "/", Secure: true}}}); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -820,6 +804,147 @@ func TestPauseHoldsRenewalsAndManagedRequests(t *testing.T) {
 	}
 }
 
+func TestPauseSurvivesRestart(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		jsonOK(w, "a1", "r1")
+	}))
+	defer server.Close()
+	p := providerFor(server.URL)
+	m, v, dir := managerFor(t, p)
+	if _, err := m.Import("alice", Import{Provider: "test", AccessToken: "a0", RefreshToken: "r0"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, seconds := range []int{86401, math.MaxInt/int(time.Second) + 1, math.MaxInt} {
+		_, err := m.Pause("test", seconds)
+		wantCode(t, err, "invalid_request")
+	}
+	paused, err := m.Pause("test", 600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reopen := func() *Manager {
+		t.Helper()
+		if err := v.Close(); err != nil {
+			t.Fatal(err)
+		}
+		next, err := OpenVault(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		v = next
+		t.Cleanup(func() { next.Close() })
+		restarted, err := NewManager(v, Config{Providers: []Provider{p}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return restarted
+	}
+	m = reopen()
+	if info := m.Providers(); !info[0].PausedUntil.Equal(paused.PausedUntil) {
+		t.Fatalf("restart lifted the pause: %v", info[0].PausedUntil)
+	}
+	_, err = m.Request("alice", RequestInput{URL: server.URL + "/me"})
+	wantCode(t, err, "provider_paused")
+	raw, err := os.ReadFile(filepath.Join(dir, providerPausesFile))
+	if err != nil || bytes.Contains(raw, []byte(`"test"`)) {
+		t.Fatalf("pause state missing or not encrypted: %v", err)
+	}
+	if _, err := m.Resume("test"); err != nil {
+		t.Fatal(err)
+	}
+	m = reopen()
+	if info := m.Providers(); !info[0].PausedUntil.IsZero() {
+		t.Fatal("resume did not persist")
+	}
+	if _, err := os.Stat(filepath.Join(dir, providerPausesFile)); !os.IsNotExist(err) {
+		t.Fatalf("empty pause state left on disk: %v", err)
+	}
+	if _, err := m.Request("alice", RequestInput{URL: server.URL + "/me"}); err != nil {
+		t.Fatal(err)
+	}
+	if calls.Load() != 2 {
+		t.Fatalf("%d upstream calls", calls.Load())
+	}
+	// A clock that moved backwards cannot stretch a stored pause past 24
+	// hours, and pauses of providers no longer configured lapse.
+	if err := v.SavePauses(map[string]time.Time{"test": time.Now().Add(72 * time.Hour), "gone": time.Now().Add(time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	m = reopen()
+	if until := m.Providers()[0].PausedUntil; until.IsZero() || until.After(time.Now().Add(maxPause)) {
+		t.Fatalf("stored pause not clamped: %v", until)
+	}
+}
+
+func TestPauseStopsCallQueuedBehindInterval(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		fmt.Fprint(w, "ok")
+	}))
+	defer server.Close()
+	p := providerFor(server.URL)
+	p.MinIntervalMS = 1500
+	m, v, _ := managerFor(t, p)
+	if _, err := m.Import("alice", Import{Provider: "test", AccessToken: "a0", RefreshToken: "r0"}); err != nil {
+		t.Fatal(err)
+	}
+	e, _ := m.get("alice")
+	e.state.NextRefresh = time.Now().Add(time.Hour)
+	if _, err := m.Request("alice", RequestInput{URL: server.URL + "/one"}); err != nil {
+		t.Fatal(err)
+	}
+	queued := make(chan error, 1)
+	go func() {
+		_, err := m.Request("alice", RequestInput{URL: server.URL + "/two"})
+		queued <- err
+	}()
+	time.Sleep(300 * time.Millisecond)
+	if _, err := m.Pause("test", 60); err != nil {
+		t.Fatal(err)
+	}
+	wantCode(t, <-queued, "provider_paused")
+	if calls.Load() != 1 {
+		t.Fatalf("queued call was sent after the pause: %d calls", calls.Load())
+	}
+	states, err := v.LoadAll()
+	if err != nil || states[0].PendingRequest {
+		t.Fatalf("refused call left its checkpoint: %v", err)
+	}
+}
+
+func TestDispatchSpacesCallsThatActuallyLeave(t *testing.T) {
+	const interval = 300 * time.Millisecond
+	g := &gate{}
+	if p := g.reserve(interval, time.Second); p != nil { // A: slot now
+		t.Fatal(p)
+	}
+	sent := make(chan time.Time, 1)
+	go func() { // B: slot one interval later
+		if p := g.reserve(interval, time.Second); p != nil {
+			t.Error(p)
+		}
+		if p := g.dispatch(interval, time.Second); p != nil {
+			t.Error(p)
+		}
+		sent <- time.Now()
+	}()
+	// A is delayed after its reservation, as by a slow checkpoint write.
+	time.Sleep(250 * time.Millisecond)
+	if p := g.dispatch(interval, time.Second); p != nil {
+		t.Fatal(p)
+	}
+	aSent := time.Now()
+	if gap := (<-sent).Sub(aSent); gap < interval-20*time.Millisecond {
+		t.Fatalf("calls left only %v apart", gap)
+	}
+	if p := g.dispatch(time.Hour, time.Second); p == nil || p.Code != "retry_later" || p.RetryAt.IsZero() {
+		t.Fatalf("over-long wait not refused: %v", p)
+	}
+}
+
 func TestKeepAlivePoolsManagedRequestsButNotRenewals(t *testing.T) {
 	for _, keepAlive := range []bool{false, true} {
 		var conns atomic.Int32
@@ -857,17 +982,25 @@ func TestKeepAlivePoolsManagedRequestsButNotRenewals(t *testing.T) {
 	}
 }
 
-func TestStructuredAndTextCookieImports(t *testing.T) {
+func TestStructuredCookieImports(t *testing.T) {
 	p := cookieProvider("https://www.example.test")
 	p.Origins = []string{"https://www.example.test", "https://api.www.example.test"}
 	p.AllowHTTPLoopback = false
 	p.CookieDomain = ".www.example.test"
-	m, _, _ := managerFor(t, p)
+	m, _, dir := managerFor(t, p)
+	export := func(text string) []ImportCookie {
+		t.Helper()
+		cookies, _, err := cookiefile.Parse([]byte(text), cookiefile.Netscape)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return cookies
+	}
 	text := "# Netscape HTTP Cookie File\n" +
 		".www.example.test\tTRUE\t/\tTRUE\t0\tsession\ts1\n" +
 		"#HttpOnly_.example.test\tTRUE\t/\tTRUE\t0\twide\tw1\n" +
 		".unrelated.test\tTRUE\t/\tTRUE\t0\tforeign\tf1\n"
-	meta, err := m.Import("alice", Import{Provider: "test", CookieText: text})
+	meta, err := m.Import("alice", Import{Provider: "test", Cookies: export(text)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -880,7 +1013,7 @@ func TestStructuredAndTextCookieImports(t *testing.T) {
 	if got := cookieHeaders(e.state.Cookies, api, time.Now()); !strings.Contains(got, "session=s1") || !strings.Contains(got, "wide=w1") || strings.Contains(got, "foreign") {
 		t.Fatalf("api got %q", got)
 	}
-	_, err = m.Import("bob", Import{Provider: "test", CookieText: ".unrelated.test\tTRUE\t/\tTRUE\t0\tforeign\tf1\n"})
+	_, err = m.Import("bob", Import{Provider: "test", Cookies: export(".unrelated.test\tTRUE\t/\tTRUE\t0\tforeign\tf1\n")})
 	wantCode(t, err, "invalid_request")
 	if !strings.Contains(err.Error(), "belong") {
 		t.Fatal(err)
@@ -896,8 +1029,21 @@ func TestStructuredAndTextCookieImports(t *testing.T) {
 	// Structured cookies without a domain need cookie_origin.
 	_, err = m.Import("dave", Import{Provider: "test", Cookies: []ImportCookie{{Name: "x", Value: "y"}}})
 	wantCode(t, err, "invalid_request")
-	_, err = m.Import("erin", Import{Provider: "test", CookieFormat: "json"})
-	wantCode(t, err, "invalid_request")
+	// The daemon no longer parses raw exports; the field is unknown.
+	token, _ := ReadAPIToken(dir)
+	daemon := httptest.NewServer(Handler(m, token))
+	defer daemon.Close()
+	req, _ := http.NewRequest("PUT", daemon.URL+"/v1/sessions/erin", strings.NewReader(`{"provider":"test","cookie_text":"a=b"}`))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 400 {
+		t.Fatalf("cookie_text accepted: %d", resp.StatusCode)
+	}
 }
 
 func TestVintedExampleAdapter(t *testing.T) {
@@ -924,7 +1070,7 @@ func TestVintedExampleAdapter(t *testing.T) {
 				w.WriteHeader(400)
 				return
 			}
-			nextAccess := fakeJWT("1001")
+			nextAccess := fmt.Sprintf("access-%d", n)
 			nextRefresh := fmt.Sprintf("refresh-%d", n)
 			http.SetCookie(w, &http.Cookie{Name: "access_token_web", Value: nextAccess, Domain: ".www.vinted.com", Path: "/", Secure: true, HttpOnly: true, MaxAge: 7200})
 			http.SetCookie(w, &http.Cookie{Name: "refresh_token_web", Value: nextRefresh, Domain: ".www.vinted.com", Path: "/", Secure: true, HttpOnly: true, MaxAge: 604800})
@@ -933,7 +1079,7 @@ func TestVintedExampleAdapter(t *testing.T) {
 		case r.Host == "api.www.vinted.com":
 			refresh, _ := r.Cookie("refresh_token_web")
 			if r.Header.Get("Authorization") != "" {
-				t.Error("authorization none sent a bearer token")
+				t.Error("a cookie-only adapter sent a bearer token")
 			}
 			if refresh == nil {
 				w.WriteHeader(401)
@@ -942,7 +1088,7 @@ func TestVintedExampleAdapter(t *testing.T) {
 			fmt.Fprintf(w, `{"saved_searches":[],"refresh":%q}`, refresh.Value)
 		case r.Host == "www.vinted.com":
 			// Server-rendered pages issue guest tokens for unrecognized sessions.
-			http.SetCookie(w, &http.Cookie{Name: "access_token_web", Value: fakeJWT("guest"), Domain: ".www.vinted.com", Path: "/", Secure: true})
+			http.SetCookie(w, &http.Cookie{Name: "access_token_web", Value: "guest-access", Domain: ".www.vinted.com", Path: "/", Secure: true})
 			fmt.Fprint(w, `<html>catalog</html>`)
 		default:
 			t.Errorf("unexpected host %s", r.Host)
@@ -956,7 +1102,7 @@ func TestVintedExampleAdapter(t *testing.T) {
 	}
 	routeTo(t, m, "vinted", server)
 	m.providers["vinted"].MinIntervalMS = 0
-	cookies := "access_token_web=" + fakeJWT("1001") + "; refresh_token_web=refresh-0; anon_id=synthetic"
+	cookies := "access_token_web=access-0; refresh_token_web=refresh-0; anon_id=synthetic"
 	if _, err := m.Import("me", Import{Provider: "vinted", CookieOrigin: "https://www.vinted.com", CookieHeader: cookies}); err != nil {
 		t.Fatal(err)
 	}
@@ -975,8 +1121,9 @@ func TestVintedExampleAdapter(t *testing.T) {
 		t.Fatal(err)
 	}
 	e, _ := m.get("me")
-	if sub, _, _ := cookieSubject(e.state.Cookies, "access_token_web"); sub != "1001" {
-		t.Fatalf("guest page replaced the session token (subject %q)", sub)
+	api, _ := url.Parse("https://api.www.vinted.com/api/v2/users/current")
+	if got := cookieHeaders(e.state.Cookies, api, time.Now()); !strings.Contains(got, "access_token_web=access-1") || strings.Contains(got, "guest") {
+		t.Fatalf("guest page replaced the session token: %q", got)
 	}
 	block.Store(true)
 	_, err = m.Refresh("me")

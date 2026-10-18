@@ -22,8 +22,6 @@ Optional per-provider fields, described in [Provider options](#provider-options)
 |---|---|
 | `cookie_domain` | A domain such as `.www.example.com`. Cookies the provider sets for exactly that domain match every listed origin inside it, and no others. |
 | `protected_cookies` | Cookie names that only a successful renewal may set. Managed responses and `/cookies` captures cannot replace them. |
-| `jwt_subject_cookie` | A protected cookie holding a JWT. A renewal that issues a token for another `sub` is refused. |
-| `authorization` | `bearer` (default), `none`, or `cookie_bearer` with `authorization_cookie`. |
 | `proxy` / `proxy_env` | Egress proxy: `http`, `https`, `socks5` or `socks5h`. Fails closed; never falls back to a direct connection. |
 | `block_signatures` | Bot-protection responses that mean "try later", not "log in again". |
 | `min_interval_ms` | Minimum gap between upstream calls of this provider, renewals and managed requests together. |
@@ -101,11 +99,11 @@ Response selectors use RFC 6901 JSON pointers, not JSONPath. `/data/tokens/0/val
 | `expires_in_pointer` | Optional positive integer seconds. If the field is absent, no expiry is invented. |
 | `expires_at_pointer` | When configured, must select a future RFC3339 time string. |
 | `success_pointer` | When configured, must select the JSON boolean `true`. |
-| `require_set_cookie` | Require at least one accepted, retained replacement cookie. Deletions are honored but are not renewal evidence. It does not prove indefinite authorization. |
+| `require_set_cookie` | Require at least one accepted, retained replacement cookie. With `protected_cookies`, every protected cookie the session holds must be replaced too. Deletions are honored but are not renewal evidence. It does not prove indefinite authorization. |
 
 A 2xx response alone does not count as renewal. The adapter must receive a configured access token, an accepted cookie update, or a configured successful boolean check. An HTML login page with no such evidence is not treated as successful renewal.
 
-Every configured proof is required, not just one. When a provider returns rotated tokens in both JSON and `Set-Cookie` (Vinted does), configure the token pointers and `require_set_cookie: true`. If the JSON rotates a single-use refresh token but the replacement cookie is missing, the renewal stops as `protocol_error` instead of keeping a stale cookie that the next renewal would replay.
+Every configured proof is required, not just one. When a provider rotates single-use credentials in `Set-Cookie` (Vinted does), list them in `protected_cookies` and set `require_set_cookie: true`. A response that replaces only an unrelated cookie (a bot-protection cookie, say) then stops as `protocol_error` instead of keeping a stale refresh cookie that the next renewal would replay. When the JSON body rotates a token too, configure its pointer as well.
 
 A `Set-Cookie` deletion is accepted and honored, but a deletion alone does not prove that usable credentials were renewed. `Max-Age` becomes a fixed absolute timestamp before persistence; restoring the state cannot reset that countdown. Session cookies without expiry can be retained, but their server-side validity remains provider-controlled. Invalid-domain cookies and invalid `__Host-`/`__Secure-` cookies are discarded. Partitioned cookies are not supported. A profile is limited to 256 cookies.
 
@@ -120,21 +118,9 @@ A `Set-Cookie` deletion is accepted and honored, but a deletion alone does not p
 - A scoped cookie replaces host-only copies of the same name and path inside its domain, so a rotated token cannot be shadowed by the imported one.
 - A bare `Cookie` header imported for an origin inside `cookie_domain` is scoped to it, because the header carries no scope of its own.
 
-### Protected cookies and subject checks
+### Protected cookies
 
-`protected_cookies` lists credential cookies that only a successful (2xx) renewal response may set or delete. `Set-Cookie` values for those names from managed responses, `/cookies` captures, and non-2xx renewal responses are ignored. Ignoring them is not an error, so a server-rendered page that hands out guest tokens does not overwrite or pause the real session.
-
-`jwt_subject_cookie` names one protected cookie that holds a JWT. Import requires it and records its `sub` claim in the encrypted session state; the claim is never returned by the API. When a renewal issues that cookie with a different `sub`, the previous cookies are kept and the session stops as `reauth_required`. The JWT signature is not verified; this is a consistency check, not authentication.
-
-### Authorization styles
-
-| `authorization` | Managed requests and `/headers` send |
-|---|---|
-| `bearer` (default) | `Authorization: Bearer <access token>` when an unexpired access token is stored, plus matching cookies. |
-| `none` | Cookies only. A stored access token is still available to refresh templates. |
-| `cookie_bearer` | `Authorization: Bearer <value>` of the `authorization_cookie` cookie that matches the URL, plus matching cookies. |
-
-OAuth adapters always use `bearer`.
+`protected_cookies` lists credential cookies that only a successful (2xx) renewal response may set or delete. `Set-Cookie` values for those names from managed responses, `/cookies` captures, and non-2xx renewal responses are ignored. Ignoring them is not an error, so a server-rendered page that hands out guest tokens does not overwrite or pause the real session. With `require_set_cookie`, a successful renewal must replace every protected cookie the session still holds (see above).
 
 ### Egress proxy
 
@@ -160,7 +146,7 @@ A matching renewal response becomes `upstream_blocked`: the session moves to `re
 
 ### Pacing and pause
 
-`min_interval_ms` (0–3600000) spaces upstream calls of one provider across all of its sessions, counting renewals and managed requests together. The gap is measured from when the previous call was dispatched. A call that would wait longer than `timeout_seconds` is refused with `retry_later` and a `retry_at` instead; a deferred renewal keeps serving still-valid credentials.
+`min_interval_ms` (0–3600000) spaces upstream calls of one provider across all of its sessions, counting renewals and managed requests together. The gap is measured from when the previous call actually left, after its checkpoint was written, so a call delayed after taking its turn cannot crowd the next one. A call that would wait longer than `timeout_seconds` is refused with `retry_later` and a `retry_at` instead; a deferred renewal keeps serving still-valid credentials. The schedule lives in memory.
 
 Any client holding the API token can pause a provider, for example after its own requests hit a block:
 
@@ -171,7 +157,7 @@ POST /v1/providers/vinted/pause
 DELETE /v1/providers/vinted/pause
 ```
 
-While paused, managed requests fail with `provider_paused` and a `retry_at`, the scheduler starts no renewals, and `/headers` serves still-valid credentials without renewing. A pause only extends an existing one (1–86400 seconds per call). It is held in memory and a daemon restart clears it. `GET /v1/providers` shows `paused_until`.
+While paused, managed requests fail with `provider_paused` and a `retry_at`, the scheduler starts no renewals, and `/headers` serves still-valid credentials without renewing. A call that was already waiting for its turn when the pause was set is refused too, before anything is sent. A pause only extends an existing one (1–86400 seconds per call). It is saved encrypted in the state directory, so a daemon restart keeps it; if saving fails the pause still applies and the call reports `storage_failure`. `GET /v1/providers` shows `paused_until`.
 
 ### Keep-alive
 
@@ -179,43 +165,42 @@ While paused, managed requests fail with `provider_paused` and a `retry_at`, the
 
 ### Managed request limits
 
-`max_request_body_bytes` and `max_response_body_bytes` raise or lower the buffered managed request limits (defaults 1 MiB and 4 MiB, at most 64 MiB each). The daemon sizes the `/request` API body limit to the largest adapter limit in base64. Bodies are still buffered in memory; this is not streaming.
+`max_request_body_bytes` and `max_response_body_bytes` raise or lower the buffered managed request limits (defaults 1 MiB and 4 MiB, at most 64 MiB each). The daemon sizes the `/request` API body limit to the largest adapter limit in base64. Bodies are still buffered in memory; this is not streaming. Base64 and JSON encoding mean one in-flight call can hold about four times its body limit in memory, and calls of different sessions run concurrently, so size the limits to the host.
 
 ## Cookie imports
 
-`connect` accepts cookies in several shapes. All of them are filtered through the provider allowlist: cookies for domains outside every listed origin are skipped, so a whole-browser export imports only what this provider may use.
+`connect` accepts cookies in these shapes. All of them are filtered through the provider allowlist: cookies for domains outside every listed origin are skipped, so a whole-browser export imports only what this provider may use.
 
 | Input | API field | Notes |
 |---|---|---|
-| `Cookie:` header or `a=b; c=d` | `cookie_header` or `cookie_text` | No scope or expiry. Stored for `cookie_origin` (or `cookie_domain`, see above). |
-| `Set-Cookie` values | `set_cookies` or `cookie_text` | Attributes are kept. Lines without `Domain` belong to `cookie_origin`. |
-| Netscape `cookies.txt` | `cookie_text` | Tab-separated; `#HttpOnly_` lines set HttpOnly; expiry 0 is a session cookie. |
-| Cookie-Editor JSON array, or `{"url": ..., "cookies": [...]}` | `cookie_text` | `hostOnly`, `expirationDate`, `sameSite` are honored; the wrapper's URL supplies a missing domain. |
-| EditThisCookie, Chrome DevTools (`Network.getAllCookies`), Playwright storage state | `cookie_text` | Without `hostOnly`, a leading dot marks a domain cookie; `expires: -1` is a session cookie. |
-| HAR | `cookie_text` | Entries are replayed in order: cookies each request carried, then cookies its response set. |
+| `Cookie:` header or `a=b; c=d` | `cookie_header` | No scope or expiry. Stored for `cookie_origin` (or `cookie_domain`, see above). |
+| `Set-Cookie` values | `set_cookies` | Attributes are kept. Lines without `Domain` belong to `cookie_origin`. |
 | Structured cookies | `cookies` | `{name, value, domain, host_only, path, expires, secure, http_only, same_site}`. |
 
-`cookie_format` (`auto`, `netscape`, `json`, `header`, `set-cookie`, `har`) overrides detection. Domain, path, expiry, Secure, HttpOnly and SameSite are preserved where the input has them. A host-only cookie is stored for each listed origin on that host. A domain cookie equal to `cookie_domain` keeps that scope; other domain cookies are copied host-only onto each listed origin inside the domain. When several fields are supplied, later ones win: `cookie_header`, then `set_cookies`, then `cookies` and `cookie_text`.
+A host-only cookie is stored for each listed origin on that host. A domain cookie equal to `cookie_domain` keeps that scope; other domain cookies are copied host-only onto each listed origin inside the domain. A `__Host-` cookie that names a domain is rejected. When several fields are supplied, later ones win: `cookie_header`, then `set_cookies`, then `cookies`.
 
-The CLI parses exports locally, so large HAR files do not cross the 2 MiB API body limit:
+The daemon does not parse browser export files. The CLI does, locally, and sends structured `cookies`; the Go package `github.com/Microck/galleton/cookiefile` exposes the same parser. It reads, up to 16 MiB and 4096 cookies:
+
+- Netscape `cookies.txt`: tab-separated, `#HttpOnly_` lines set HttpOnly, expiry 0 is a session cookie
+- Cookie-Editor or EditThisCookie JSON, as an array or a `{"url": ..., "cookies": [...]}` wrapper: `hostOnly`, `expirationDate` and `sameSite` are honored, and the wrapper's URL supplies a missing domain. DevTools and Playwright cookie lists have the same shape: without `hostOnly`, a leading dot marks a domain cookie, and `expires: -1` is a session cookie
+- a `Cookie:` header or `a=b; c=d`
 
 ```sh
 galleton connect --provider vinted --cookies ./cookies.txt account
-galleton connect --provider vinted --cookies ./session.har --format har account
+galleton connect --provider vinted --cookies ./cookies.json --format json account
 galleton connect --provider vinted --cookies - --cookie-origin https://www.vinted.com account < cookie-header.txt
 ```
 
-`--credentials FILE` merges a credentials JSON object (for tokens or secrets), and `--replace --expected-revision N` reconnects an existing session. The Go package `github.com/Microck/galleton/cookiefile` exposes the same parser.
+`--credentials FILE` merges a credentials JSON object (for tokens or secrets), and `--replace --expected-revision N` reconnects an existing session.
 
 ## Example: Vinted web session
 
 [`examples/adapters.vinted.json`](../examples/adapters.vinted.json) configures `www.vinted.com` and `api.www.vinted.com`:
 
 - renewal is `POST https://www.vinted.com/web/api/auth/refresh` with body `{}` and the session cookies attached
-- the response must carry `/access_token`, may rotate `/refresh_token`, sets the expiry from `/expires_in`, and must also rotate cookies (`require_set_cookie`)
+- the response must rotate cookies (`require_set_cookie`), including both protected ones, and sets the expiry from `/expires_in`. No access-token pointer is configured, so requests stay cookie-based like the website and carry no `Authorization` header
 - `cookie_domain` is `.www.vinted.com`, so rotated `access_token_web`/`refresh_token_web` reach both hosts; `datadome` and `__cf_bm`, set on `.vinted.com`, stay on the origin that received them
-- `access_token_web` and `refresh_token_web` are protected, and the `sub` of `access_token_web` must stay the imported account's
-- `authorization: none` keeps requests cookie-based, like the website
+- `access_token_web` and `refresh_token_web` are protected: a catalog page handing out guest tokens cannot replace them, and a renewal that does not replace both stops instead of replaying a spent refresh cookie
 - DataDome and Cloudflare challenge pages, and any non-JSON 403, are temporary refusals
 - requests are spaced by at least one second, pooled, and allowed 32 MiB uploads and 8 MiB pages
 

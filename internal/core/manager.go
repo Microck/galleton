@@ -35,6 +35,7 @@ type Manager struct {
 	providers map[string]*Provider
 	vault     *Vault
 	stopping  atomic.Bool
+	pauseMu   sync.Mutex // serializes pause changes and their persistence
 }
 
 func NewManager(v *Vault, c Config) (*Manager, error) {
@@ -47,6 +48,21 @@ func NewManager(v *Vault, c Config) (*Manager, error) {
 		return nil, err
 	}
 	m := &Manager{entries: map[string]*entry{}, providers: providers, vault: v}
+	pauses, err := v.LoadPauses()
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now().UTC()
+	for name, until := range pauses {
+		// Pauses of removed providers lapse. A clock moved backwards cannot
+		// stretch a pause past its maximum length.
+		if p := providers[name]; p != nil && until.After(now) {
+			if limit := now.Add(maxPause); until.After(limit) {
+				until = limit
+			}
+			p.gate.pause(until)
+		}
+	}
 	for _, s := range states {
 		changed := false
 		if s.PendingRefresh || s.PendingRequest {
@@ -176,9 +192,6 @@ func (m *Manager) Import(id string, in Import) (Metadata, error) {
 	if len(in.AccessToken) > 64<<10 || len(in.RefreshToken) > 64<<10 || len(in.CookieHeader) > 128<<10 || len(in.Secrets) > 32 || len(in.Cookies) > cookiefile.MaxCookies {
 		return Metadata{}, invalid("Credentials exceed size limits.")
 	}
-	if in.CookieFormat != "" && in.CookieText == "" {
-		return Metadata{}, invalid("cookie_format needs cookie_text.")
-	}
 	if !validHeader("Authorization", in.AccessToken) || !validHeader("Authorization", in.RefreshToken) {
 		return Metadata{}, invalid("Token contains invalid header characters.")
 	}
@@ -202,7 +215,7 @@ func (m *Manager) Import(id string, in Import) (Metadata, error) {
 		origin = u
 	}
 	// Order of precedence: Cookie header, then Set-Cookie values, then
-	// structured cookies and cookie_text. Later values replace earlier ones.
+	// structured cookies. Later values replace earlier ones.
 	var header []ImportCookie
 	if in.CookieHeader != "" {
 		parsed, err := http.ParseCookie(in.CookieHeader)
@@ -215,14 +228,7 @@ func (m *Manager) Import(id string, in Import) (Metadata, error) {
 			header = append(header, ImportCookie{Name: c.Name, Value: c.Value, Path: "/", Secure: origin.Scheme == "https"})
 		}
 	}
-	structured := append([]ImportCookie(nil), in.Cookies...)
-	if in.CookieText != "" {
-		parsed, _, err := cookiefile.Parse([]byte(in.CookieText), in.CookieFormat, now)
-		if err != nil {
-			return Metadata{}, invalid("Could not parse cookie_text: " + err.Error() + ".")
-		}
-		structured = append(structured, parsed...)
-	}
+	structured := in.Cookies
 	skipped := 0
 	if len(header) > 0 {
 		var err error
@@ -249,13 +255,6 @@ func (m *Manager) Import(id string, in Import) (Metadata, error) {
 		if s.Cookies, skipped, err = importCookies(p, s.Cookies, origin, structured, now); err != nil {
 			return Metadata{}, err
 		}
-	}
-	if p.JWTSubjectCookie != "" {
-		sub, found, ok := cookieSubject(s.Cookies, p.JWTSubjectCookie)
-		if !found || !ok {
-			return Metadata{}, invalid("This adapter needs its jwt_subject_cookie, carrying a JWT with a sub claim.")
-		}
-		s.Subject = sub
 	}
 	if s.AccessToken == "" && s.RefreshToken == "" && len(s.Cookies) == 0 && len(s.Secrets) == 0 {
 		if skipped > 0 {
@@ -518,7 +517,7 @@ func (m *Manager) ensure(e *entry, force bool) error {
 		pending.LastError = result
 		pending.Failures++
 		switch result.Code {
-		case "retry_later", "upstream_blocked":
+		case "retry_later", "upstream_blocked", "provider_paused":
 			pending.Status = "retry_wait"
 			pending.NextRefresh = e.completed.Add(backoff(pending.Failures))
 			if result.RetryAt.After(pending.NextRefresh) {
@@ -566,10 +565,8 @@ type HeadersResult struct {
 	ExpiresAt time.Time         `json:"expires_at,omitempty"`
 }
 
-// headersFor builds the authentication headers for an allowlisted URL. The
-// adapter's authorization style decides whether Authorization is sent, and
-// whether it carries the access token or a cookie value.
-func headersFor(p *Provider, s *State, uRaw string) (HeadersResult, error) {
+// headersFor builds the authentication headers for an allowlisted URL.
+func headersFor(s *State, uRaw string) (HeadersResult, error) {
 	u, _, err := canonicalURL(uRaw)
 	if err != nil {
 		return HeadersResult{}, err
@@ -577,18 +574,9 @@ func headersFor(p *Provider, s *State, uRaw string) (HeadersResult, error) {
 	headers := map[string]string{}
 	now := time.Now()
 	var expires time.Time
-	switch p.Authorization {
-	case "none":
-	case "cookie_bearer":
-		if value, exp, ok := cookieValue(s.Cookies, u, p.AuthorizationCookie, now); ok && value != "" && validHeader("Authorization", value) {
-			headers["Authorization"] = "Bearer " + value
-			expires = exp
-		}
-	default:
-		if s.AccessToken != "" && (s.AccessExpiresAt.IsZero() || now.Before(s.AccessExpiresAt)) {
-			headers["Authorization"] = "Bearer " + s.AccessToken
-			expires = s.AccessExpiresAt
-		}
+	if s.AccessToken != "" && (s.AccessExpiresAt.IsZero() || now.Before(s.AccessExpiresAt)) {
+		headers["Authorization"] = "Bearer " + s.AccessToken
+		expires = s.AccessExpiresAt
 	}
 	if c := cookieHeaders(s.Cookies, u, now); c != "" {
 		headers["Cookie"] = c
@@ -625,7 +613,7 @@ func (m *Manager) Headers(id, rawURL string) (HeadersResult, error) {
 	if err = m.ensure(e, false); err != nil {
 		return HeadersResult{}, err
 	}
-	result, err := headersFor(p, e.state, rawURL)
+	result, err := headersFor(e.state, rawURL)
 	if err != nil {
 		return HeadersResult{}, retryWaitProblem(e.state, err)
 	}
@@ -738,7 +726,7 @@ func (m *Manager) Request(id string, in RequestInput) (RequestResult, error) {
 	if err = m.ensure(e, false); err != nil {
 		return RequestResult{}, err
 	}
-	auth, err := headersFor(p, e.state, u.String())
+	auth, err := headersFor(e.state, u.String())
 	if err != nil {
 		return RequestResult{}, retryWaitProblem(e.state, err)
 	}
@@ -776,7 +764,15 @@ func (m *Manager) Request(id string, in RequestInput) (RequestResult, error) {
 	}
 	e.state = pending
 	e.publish()
-	p.markSent()
+	if wait := p.dispatch(); wait != nil {
+		// Paused or crowded after the checkpoint: nothing was sent.
+		n := cloneState(e.state)
+		n.PendingRequest = false
+		if err := m.commit(e, n); err != nil {
+			return RequestResult{}, err
+		}
+		return RequestResult{}, wait
+	}
 	resp, err := p.resource.Do(req)
 	if err != nil {
 		if connected.Load() {
@@ -921,7 +917,7 @@ func (m *Manager) Providers() []ProviderInfo {
 
 // Pause stops managed requests and renewals for a provider until the given
 // number of seconds have passed. It only extends an existing pause. The pause
-// is held in memory and does not survive a daemon restart.
+// is saved in the vault, so a daemon restart keeps it.
 func (m *Manager) Pause(provider string, seconds int) (ProviderPause, error) {
 	if err := checkID(provider); err != nil {
 		return ProviderPause{}, err
@@ -930,13 +926,23 @@ func (m *Manager) Pause(provider string, seconds int) (ProviderPause, error) {
 	if p == nil {
 		return ProviderPause{}, problem(404, "not_found", "Provider not found.")
 	}
-	if seconds < 1 || time.Duration(seconds)*time.Second > maxPause {
+	// Compare before converting: a huge count would overflow time.Duration.
+	if seconds < 1 || seconds > int(maxPause/time.Second) {
 		return ProviderPause{}, invalid("seconds must be 1–86400.")
 	}
+	m.pauseMu.Lock()
+	defer m.pauseMu.Unlock()
+	// The pause holds in memory even when saving it fails: refusing calls is
+	// the safe side. The error tells the client it would not survive a restart.
 	until := p.gate.pause(time.Now().UTC().Add(time.Duration(seconds) * time.Second))
+	if err := m.savePauses(); err != nil {
+		return ProviderPause{}, problem(503, "storage_failure", "The pause is in effect but could not be saved; a daemon restart would lift it.")
+	}
 	return ProviderPause{Provider: p.Name, PausedUntil: until}, nil
 }
 
+// Resume clears a provider's pause. When the cleared state cannot be saved the
+// pause stays, so memory and disk never disagree in the unsafe direction.
 func (m *Manager) Resume(provider string) (ProviderPause, error) {
 	if err := checkID(provider); err != nil {
 		return ProviderPause{}, err
@@ -945,8 +951,29 @@ func (m *Manager) Resume(provider string) (ProviderPause, error) {
 	if p == nil {
 		return ProviderPause{}, problem(404, "not_found", "Provider not found.")
 	}
+	m.pauseMu.Lock()
+	defer m.pauseMu.Unlock()
+	previous, paused := p.gate.paused(time.Now().UTC())
 	p.gate.resume()
+	if err := m.savePauses(); err != nil {
+		if paused {
+			p.gate.pause(previous)
+		}
+		return ProviderPause{}, problem(503, "storage_failure", "The pause could not be cleared on disk, so it stays in effect.")
+	}
 	return ProviderPause{Provider: p.Name}, nil
+}
+
+// savePauses writes every active provider pause. Callers hold pauseMu.
+func (m *Manager) savePauses() error {
+	now := time.Now().UTC()
+	pauses := map[string]time.Time{}
+	for name, p := range m.providers {
+		if until, paused := p.gate.paused(now); paused {
+			pauses[name] = until
+		}
+	}
+	return m.vault.SavePauses(pauses)
 }
 
 // requestEnvelopeLimit bounds the JSON body of the managed request endpoint:

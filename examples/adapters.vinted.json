@@ -8,8 +8,6 @@
       "refresh_method": "POST",
       "body_format": "json",
       "response": {
-        "access_token_pointer": "/access_token",
-        "refresh_token_pointer": "/refresh_token",
         "expires_in_pointer": "/expires_in",
         "require_set_cookie": true
       },
@@ -17,8 +15,6 @@
       "refresh_before_seconds": 300,
       "cookie_domain": ".www.vinted.com",
       "protected_cookies": ["access_token_web", "refresh_token_web"],
-      "jwt_subject_cookie": "access_token_web",
-      "authorization": "none",
       "block_signatures": [
         {"status": [403], "body_contains": "captcha-delivery.com"},
         {"status": [403, 503], "header": "Cf-Mitigated", "header_contains": "challenge"},

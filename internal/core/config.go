@@ -232,24 +232,6 @@ func compileScope(p *Provider) error {
 		}
 		p.protected[name] = true
 	}
-	if p.JWTSubjectCookie != "" && !p.protected[p.JWTSubjectCookie] {
-		return errors.New("jwt_subject_cookie must also be listed in protected_cookies")
-	}
-	switch p.Authorization {
-	case "", "bearer", "none":
-		if p.AuthorizationCookie != "" {
-			return errors.New("authorization_cookie requires authorization cookie_bearer")
-		}
-	case "cookie_bearer":
-		if !validCookieName(p.AuthorizationCookie) {
-			return errors.New("authorization cookie_bearer needs a valid authorization_cookie")
-		}
-	default:
-		return errors.New("authorization must be bearer, none or cookie_bearer")
-	}
-	if p.Kind == "oauth2" && p.Authorization != "" && p.Authorization != "bearer" {
-		return errors.New("oauth2 access tokens are always sent as Bearer")
-	}
 	return nil
 }
 

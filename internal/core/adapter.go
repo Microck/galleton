@@ -259,7 +259,11 @@ func performRefresh(s *State, p *Provider, client *http.Client, req *http.Reques
 	var connected atomic.Bool
 	trace := &httptrace.ClientTrace{GotConn: func(httptrace.GotConnInfo) { connected.Store(true) }}
 	req = req.WithContext(httptrace.WithClientTrace(req.Context(), trace))
-	p.markSent()
+	// Nothing has been sent yet: a pause set meanwhile, or another call that
+	// left too recently, refuses or delays this one.
+	if wait := p.dispatch(); wait != nil {
+		return wait
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		if !connected.Load() {
@@ -272,7 +276,8 @@ func performRefresh(s *State, p *Provider, client *http.Client, req *http.Reques
 	success2xx := resp.StatusCode >= 200 && resp.StatusCode < 300
 	retained := 0
 	var cookieProblem *Problem
-	before := s.Cookies
+	held := protectedHeld(s.Cookies, p.protected, now)
+	replaced := map[string]bool{}
 	if lines := resp.Header.Values("Set-Cookie"); len(lines) > 0 {
 		cookies, rejected := parseSetCookiesPartial(lines)
 		if rejected {
@@ -281,6 +286,11 @@ func performRefresh(s *State, p *Provider, client *http.Client, req *http.Reques
 		if !success2xx {
 			// Only a successful renewal may replace protected credential cookies.
 			cookies = withoutProtected(cookies, p.protected)
+		}
+		for _, c := range cookies {
+			if p.protected[c.Name] && c.Value != "" && c.MaxAge >= 0 && (c.Expires.IsZero() || c.Expires.After(now)) {
+				replaced[c.Name] = true
+			}
 		}
 		if len(cookies) > 0 {
 			var updated []StoredCookie
@@ -294,13 +304,6 @@ func performRefresh(s *State, p *Provider, client *http.Client, req *http.Reques
 					cookieProblem = problem(502, "protocol_error", "The provider cookie rotation included a rejected replacement cookie.")
 				}
 			}
-		}
-	}
-	if p.JWTSubjectCookie != "" && s.Subject != "" {
-		if sub, found, ok := cookieSubject(s.Cookies, p.JWTSubjectCookie); found && (!ok || sub != s.Subject) {
-			// A guest or foreign token must not replace the imported account's.
-			s.Cookies = before
-			return problem(401, "reauth_required", "The provider issued credentials for a different account subject; the imported credentials were kept. Reconnect this session.")
 		}
 	}
 	raw, readErr := io.ReadAll(io.LimitReader(resp.Body, (1<<20)+1))
@@ -407,8 +410,30 @@ func performRefresh(s *State, p *Provider, client *http.Client, req *http.Reques
 	if mapping.RequireSetCookie && retained == 0 {
 		return problem(502, "protocol_error", "The adapter requires a valid Set-Cookie renewal response.")
 	}
+	if mapping.RequireSetCookie {
+		// An unrelated cookie is not renewal evidence: every protected cookie
+		// the session held must be replaced, or the next renewal would send a
+		// refresh cookie the provider may already have consumed.
+		for name := range held {
+			if !replaced[name] {
+				return problem(502, "protocol_error", "The renewal response did not replace every protected credential cookie.")
+			}
+		}
+	}
 	if !hasToken && retained == 0 && !success {
 		return problem(502, "protocol_error", "No renewal evidence: configure a token field, a success field, or require replacement cookies.")
 	}
 	return nil
+}
+
+// protectedHeld returns the protected cookie names that are still live in
+// cookies, so they would be sent again by the next renewal.
+func protectedHeld(cookies []StoredCookie, protected map[string]bool, now time.Time) map[string]bool {
+	held := map[string]bool{}
+	for _, c := range cookies {
+		if protected[c.Cookie.Name] && (c.Cookie.Expires.IsZero() || c.Cookie.Expires.After(now)) {
+			held[c.Cookie.Name] = true
+		}
+	}
+	return held
 }

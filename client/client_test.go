@@ -128,9 +128,14 @@ func TestGoClientProvidersPauseAndCookieImport(t *testing.T) {
 	if _, err = c.Pause(ctx, "cookies", 86401); err == nil {
 		t.Fatal("pause beyond 24 hours accepted")
 	}
-	// Synthetic Cookie-Editor export, parsed by the daemon.
+	// Synthetic Cookie-Editor export, parsed by the client; the daemon drops
+	// the cookie outside the provider's origins.
 	export := `[{"domain":".www.example.test","hostOnly":false,"name":"session","value":"synthetic","path":"/","secure":true,"httpOnly":true,"session":true},{"domain":".elsewhere.test","name":"foreign","value":"x","path":"/"}]`
-	meta, err := c.Connect(ctx, "alice", client.Credentials{Provider: "cookies", CookieText: export})
+	parsed, _, err := cookiefile.Parse([]byte(export), cookiefile.Auto)
+	if err != nil {
+		t.Fatal(err)
+	}
+	meta, err := c.Connect(ctx, "alice", client.Credentials{Provider: "cookies", Cookies: parsed})
 	if err != nil || meta.CookieCount != 1 {
 		t.Fatalf("%v %#v", err, meta)
 	}

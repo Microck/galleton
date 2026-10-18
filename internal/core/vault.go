@@ -223,15 +223,79 @@ func (v *Vault) Save(s *State) error {
 	if len(raw) > 1<<20 {
 		return errors.New("session state is too large")
 	}
-	nonce, err := randomBytes(v.aead.NonceSize())
+	// Keep the existing on-disk format and authenticated-data namespace stable
+	// across the package rename so existing explicit --dir state remains readable.
+	blob, err := v.seal(raw, "sessionkit:v1:"+s.ID)
 	if err != nil {
 		return err
 	}
-	// Keep the existing on-disk format and authenticated-data namespace stable
-	// across the package rename so existing explicit --dir state remains readable.
-	blob := append([]byte("SK01"), nonce...)
-	blob = v.aead.Seal(blob, nonce, raw, []byte("sessionkit:v1:"+s.ID))
 	return atomicWrite(filepath.Join(v.dir, sessionFilename(s.ID)), blob)
+}
+
+// providerPausesFile holds client-set provider pauses, so a restart does not
+// lift a pause that a client set after seeing a block. It is encrypted and
+// authenticated like session state.
+const providerPausesFile = "provider-pauses.v1"
+
+func (v *Vault) seal(raw []byte, ad string) ([]byte, error) {
+	nonce, err := randomBytes(v.aead.NonceSize())
+	if err != nil {
+		return nil, err
+	}
+	blob := append([]byte("SK01"), nonce...)
+	return v.aead.Seal(blob, nonce, raw, []byte(ad)), nil
+}
+
+func (v *Vault) open(b []byte, ad string) ([]byte, error) {
+	n := v.aead.NonceSize()
+	if len(b) < 4+n+v.aead.Overhead() || !bytes.Equal(b[:4], []byte("SK01")) {
+		return nil, errors.New("invalid encrypted vault entry")
+	}
+	plain, err := v.aead.Open(nil, b[4:4+n], b[4+n:], []byte(ad))
+	if err != nil {
+		return nil, errors.New("vault authentication failed; wrong key or damaged state")
+	}
+	return plain, nil
+}
+
+// SavePauses replaces the stored provider pauses. An empty map removes the file.
+func (v *Vault) SavePauses(pauses map[string]time.Time) error {
+	path := filepath.Join(v.dir, providerPausesFile)
+	if len(pauses) == 0 {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		return syncDir(v.dir)
+	}
+	raw, err := json.Marshal(pauses)
+	if err != nil {
+		return err
+	}
+	blob, err := v.seal(raw, "galleton:provider-pauses:v1")
+	if err != nil {
+		return err
+	}
+	return atomicWrite(path, blob)
+}
+
+// LoadPauses returns the stored provider pauses; none when the file is absent.
+func (v *Vault) LoadPauses() (map[string]time.Time, error) {
+	b, err := safeRead(filepath.Join(v.dir, providerPausesFile), 64<<10)
+	if os.IsNotExist(err) {
+		return map[string]time.Time{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	plain, err := v.open(b, "galleton:provider-pauses:v1")
+	if err != nil {
+		return nil, err
+	}
+	pauses := map[string]time.Time{}
+	if json.Unmarshal(plain, &pauses) != nil {
+		return nil, errors.New("invalid provider pause state")
+	}
+	return pauses, nil
 }
 
 func loadRevisionWatermark(dir string) (uint64, error) {
@@ -342,13 +406,9 @@ func (v *Vault) LoadAll() ([]*State, error) {
 		if err != nil {
 			return nil, err
 		}
-		n := v.aead.NonceSize()
-		if len(b) < 4+n+v.aead.Overhead() || !bytes.Equal(b[:4], []byte("SK01")) {
-			return nil, errors.New("invalid encrypted vault entry")
-		}
-		plain, err := v.aead.Open(nil, b[4:4+n], b[4+n:], []byte("sessionkit:v1:"+id))
+		plain, err := v.open(b, "sessionkit:v1:"+id)
 		if err != nil {
-			return nil, errors.New("vault authentication failed; wrong key or damaged state")
+			return nil, err
 		}
 		var s State
 		if json.Unmarshal(plain, &s) != nil || s.ID != id {

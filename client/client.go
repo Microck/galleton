@@ -53,8 +53,6 @@ type Credentials struct {
 	CookieHeader     string              `json:"cookie_header,omitempty"`
 	SetCookies       []string            `json:"set_cookies,omitempty"`
 	Cookies          []cookiefile.Cookie `json:"cookies,omitempty"`
-	CookieText       string              `json:"cookie_text,omitempty"`   // a raw export, parsed by the daemon
-	CookieFormat     string              `json:"cookie_format,omitempty"` // see cookiefile formats; default auto
 	AccessToken      string              `json:"access_token,omitempty"`
 	RefreshToken     string              `json:"refresh_token,omitempty"`
 	AccessExpiresAt  *time.Time          `json:"access_expires_at,omitempty"`

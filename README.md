@@ -94,14 +94,13 @@ every provider can opt into a few extras, all off by default:
 
 - an egress `proxy` (http, https, socks5, socks5h) that fails closed and never falls back to a direct connection
 - `block_signatures`, so a bot-protection challenge page means "try later" instead of "log in again"
-- a `cookie_domain` shared by listed origins, `protected_cookies` that only renewal may replace, and a JWT `sub` check
-- `min_interval_ms` between upstream calls, plus a pause any client can set with `POST /v1/providers/{name}/pause`
+- a `cookie_domain` shared by listed origins, and `protected_cookies` that only renewal may replace
+- `min_interval_ms` between upstream calls, plus a pause any client can set with `POST /v1/providers/{name}/pause` that survives a restart
 - `keep_alive` for managed requests and per-adapter request/response size limits
-- `authorization` styles: bearer access token, cookies only, or a cookie sent as a bearer token
 
 [`examples/adapters.vinted.json`](examples/adapters.vinted.json) uses most of them for a Vinted web session.
 
-import real credentials through a protected onboarding flow or stdin. do not put them in shell history, committed files, or logs. `connect` also reads browser cookie exports: Netscape `cookies.txt`, Cookie-Editor / EditThisCookie / DevTools JSON, a `Cookie:` header, `Set-Cookie` lines, or a HAR file. the format is detected, `--format` overrides it, and cookies outside the provider's origins are dropped:
+import real credentials through a protected onboarding flow or stdin. do not put them in shell history, committed files, or logs. `connect` also reads browser cookie exports locally: Netscape `cookies.txt`, Cookie-Editor / EditThisCookie JSON, or a `Cookie:` header. the format is detected, `--format` overrides it, and cookies outside the provider's origins are dropped:
 
 ```sh
 ./bin/galleton connect --dir ./state --provider vinted --cookies ./cookies.txt account

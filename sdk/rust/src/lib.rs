@@ -66,12 +66,6 @@ pub struct Credentials {
     pub set_cookies: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cookies: Option<Vec<ImportCookie>>,
-    /// Raw cookie export parsed by the daemon.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cookie_text: Option<String>,
-    /// "auto" (default), "netscape", "json", "header", "set-cookie" or "har".
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cookie_format: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub access_token: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

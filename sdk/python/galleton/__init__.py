@@ -137,7 +137,7 @@ class Galleton:
         return payload
 
     def connect(self, session_id: str, credentials: Mapping[str, Any]) -> dict[str, Any]:
-        """Import credentials; supports cookies, cookie_text and cookie_format fields."""
+        """Import credentials, including structured cookies."""
         return self._call("PUT", _path(session_id), dict(credentials))
 
     def status(self, session_id: str) -> dict[str, Any]:

@@ -1,8 +1,6 @@
 package core
 
 import (
-	"encoding/base64"
-	"encoding/json"
 	"net"
 	"net/http"
 	"net/http/cookiejar"
@@ -71,25 +69,6 @@ func cookieHeaders(cookies []StoredCookie, u *url.URL, now time.Time) string {
 		req.AddCookie(c)
 	}
 	return req.Header.Get("Cookie")
-}
-
-// cookieValue returns the value of the named cookie that would be sent to u.
-func cookieValue(cookies []StoredCookie, u *url.URL, name string, now time.Time) (string, time.Time, bool) {
-	parsed, _ := http.ParseCookie(cookieHeaders(cookies, u, now))
-	for _, c := range parsed {
-		if c.Name != name {
-			continue
-		}
-		var expires time.Time
-		for _, e := range cookies {
-			if e.Cookie.Name == name && e.Cookie.Value == c.Value {
-				expires = e.Cookie.Expires
-				break
-			}
-		}
-		return c.Value, expires, true
-	}
-	return "", time.Time{}, false
 }
 
 func updateCookies(existing []StoredCookie, u *url.URL, incoming []*http.Cookie, now time.Time) ([]StoredCookie, int, int, error) {
@@ -271,6 +250,11 @@ func importCookies(p *Provider, existing []StoredCookie, origin *url.URL, list [
 			c.Domain = domain
 			targets = append(targets, target{best, domain})
 		default:
+			if !ic.HostOnly {
+				// Keep the export's Domain so placeCookie rejects a __Host-
+				// cookie that was really set for a parent domain.
+				c.Domain = domain
+			}
 			for _, o := range p.Origins {
 				u, _ := url.Parse(o)
 				if h := strings.ToLower(u.Hostname()); h == domain || !ic.HostOnly && domainMatch(h, domain) {
@@ -295,52 +279,6 @@ func importCookies(p *Provider, existing []StoredCookie, origin *url.URL, list [
 		return nil, 0, invalid("A session may contain at most 256 cookies.")
 	}
 	return out, skipped, nil
-}
-
-// jwtSubject reads the unverified "sub" claim. It is a consistency check that
-// the provider issued tokens for the imported account, not authentication.
-func jwtSubject(token string) (string, bool) {
-	parts := strings.Split(token, ".")
-	if len(parts) != 3 {
-		return "", false
-	}
-	payload, err := base64.RawURLEncoding.DecodeString(strings.TrimRight(parts[1], "="))
-	if err != nil {
-		return "", false
-	}
-	var claims map[string]json.RawMessage
-	if json.Unmarshal(payload, &claims) != nil {
-		return "", false
-	}
-	raw, ok := claims["sub"]
-	if !ok {
-		return "", false
-	}
-	var s string
-	if json.Unmarshal(raw, &s) == nil {
-		return s, s != ""
-	}
-	var n json.Number
-	if json.Unmarshal(raw, &n) == nil {
-		return n.String(), true
-	}
-	return "", false
-}
-
-// cookieSubject returns the subject shared by every stored cookie with the
-// given name. found is false when no such cookie exists.
-func cookieSubject(cookies []StoredCookie, name string) (subject string, found, ok bool) {
-	for _, c := range cookies {
-		if c.Cookie.Name != name {
-			continue
-		}
-		sub, valid := jwtSubject(c.Cookie.Value)
-		if !valid || found && sub != subject {
-			return "", true, false
-		}
-		subject, found = sub, true
-	}
-	return subject, found, found
 }
 
 func parseSetCookies(lines []string) ([]*http.Cookie, error) {

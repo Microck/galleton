@@ -26,7 +26,7 @@ func main() {
 }
 func run(args []string) error {
 	if len(args) == 0 || args[0] == "help" || args[0] == "--help" {
-		fmt.Println("Galleton " + core.Version + "\n\nCommands: init, serve, shutdown, connect, status, list, refresh, forget, headers, request, providers, pause, resume, version\n\nFlags follow the command, BEFORE positional IDs.\n  galleton init --dir ./state\n  galleton serve --dir ./state --config ./adapters.json\n  galleton connect --dir ./state account < credentials.json\n  galleton connect --dir ./state --provider vinted --cookies cookies.txt account\n  galleton status --dir ./state account\n  galleton pause --dir ./state --seconds 900 vinted\n\nconnect --cookies reads a cookie export: Netscape cookies.txt, Cookie-Editor,\nEditThisCookie or DevTools JSON, a Cookie header, Set-Cookie lines or a HAR\nfile. The format is detected; override it with --format.\n\nThe daemon listens on 127.0.0.1:8766. See README.md for adapters and SDKs.")
+		fmt.Println("Galleton " + core.Version + "\n\nCommands: init, serve, shutdown, connect, status, list, refresh, forget, headers, request, providers, pause, resume, version\n\nFlags follow the command, BEFORE positional IDs.\n  galleton init --dir ./state\n  galleton serve --dir ./state --config ./adapters.json\n  galleton connect --dir ./state account < credentials.json\n  galleton connect --dir ./state --provider vinted --cookies cookies.txt account\n  galleton status --dir ./state account\n  galleton pause --dir ./state --seconds 900 vinted\n\nconnect --cookies reads a cookie export: Netscape cookies.txt, Cookie-Editor\nor EditThisCookie JSON, or a Cookie header. The format is detected; override\nit with --format.\n\nThe daemon listens on 127.0.0.1:8766. See README.md for adapters and SDKs.")
 		return nil
 	}
 	if args[0] == "version" {
@@ -43,7 +43,7 @@ func run(args []string) error {
 	method := f.String("method", "GET", "upstream method (request)")
 	provider := f.String("provider", "", "provider name (connect --cookies)")
 	cookies := f.String("cookies", "", "cookie export file, or - for stdin (connect)")
-	format := f.String("format", "auto", "cookie export format: auto, netscape, json, header, set-cookie or har (connect)")
+	format := f.String("format", "auto", "cookie export format: auto, netscape, json or header (connect)")
 	cookieOrigin := f.String("cookie-origin", "", "origin for cookies without a domain (connect)")
 	credentials := f.String("credentials", "", "credentials JSON file instead of stdin (connect)")
 	replace := f.Bool("replace", false, "reconnect an existing session; needs --expected-revision (connect --cookies)")
@@ -226,8 +226,8 @@ func readCredentials(path string) (client.Credentials, error) {
 	return input, nil
 }
 
-// readCookies parses a cookie export locally, so large HAR files never cross
-// the API; only the structured cookies are sent to the daemon.
+// readCookies parses a cookie export locally; only the structured cookies are
+// sent to the daemon.
 func readCookies(path, format string) ([]cookiefile.Cookie, string, error) {
 	var source io.Reader = os.Stdin
 	if path != "-" {
@@ -238,14 +238,7 @@ func readCookies(path, format string) ([]cookiefile.Cookie, string, error) {
 		defer file.Close()
 		source = file
 	}
-	data, err := io.ReadAll(io.LimitReader(source, (256<<20)+1))
-	if err != nil {
-		return nil, "", err
-	}
-	if len(data) > 256<<20 {
-		return nil, "", errors.New("cookie export exceeds 256 MiB")
-	}
-	cookies, used, err := cookiefile.Parse(data, format, time.Now())
+	cookies, used, err := cookiefile.Read(source, format)
 	if err != nil {
 		return nil, used, fmt.Errorf("cookie export: %w", err)
 	}

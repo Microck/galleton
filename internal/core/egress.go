@@ -60,10 +60,12 @@ func parseProxy(raw string, allowCredentials bool) (*url.URL, error) {
 }
 
 // gate paces upstream calls of one provider across all of its sessions and
-// carries the pause clients set through the API. Both are in memory only.
+// carries the pause clients set through the API. The pause is also persisted
+// by the manager; the pacing schedule lives in memory.
 type gate struct {
 	mu          sync.Mutex
-	next        time.Time
+	next        time.Time // first free reservation slot
+	last        time.Time // last actual dispatch
 	pausedUntil time.Time
 }
 
@@ -95,8 +97,16 @@ func pausedProblem(until time.Time) *Problem {
 	return p
 }
 
-// reserve claims the next upstream slot and waits for it. It refuses instead
-// of waiting longer than maxWait, and claims nothing in that case.
+func intervalProblem(at time.Time) *Problem {
+	p := problem(503, "retry_later", "The provider's minimum interval between upstream calls is not over yet.")
+	p.RetryAt = at
+	return p
+}
+
+// reserve claims the next upstream slot and waits for it, before anything is
+// journaled. It refuses instead of waiting longer than maxWait, and claims
+// nothing in that case. Reservations spread concurrent callers; dispatch
+// still enforces the gap between calls that actually leave.
 func (g *gate) reserve(interval, maxWait time.Duration) *Problem {
 	g.mu.Lock()
 	now := time.Now().UTC()
@@ -116,9 +126,7 @@ func (g *gate) reserve(interval, maxWait time.Duration) *Problem {
 	wait := slot.Sub(now)
 	if wait > maxWait {
 		g.mu.Unlock()
-		p := problem(503, "retry_later", "The provider's minimum interval between upstream calls is not over yet.")
-		p.RetryAt = slot
-		return p
+		return intervalProblem(slot)
 	}
 	g.next = slot.Add(interval)
 	g.mu.Unlock()
@@ -128,22 +136,51 @@ func (g *gate) reserve(interval, maxWait time.Duration) *Problem {
 	return nil
 }
 
-func (p *Provider) reserve() *Problem {
-	return p.gate.reserve(time.Duration(p.MinIntervalMS)*time.Millisecond, time.Duration(p.TimeoutSeconds)*time.Second)
+// dispatch admits one call immediately before it is sent. It rechecks the
+// pause, so a pause set while a caller waited or wrote its checkpoint still
+// holds, and it measures the interval from the last call that actually left,
+// so a caller delayed after its reservation cannot crowd the next one. The
+// total wait is bounded by maxWait.
+func (g *gate) dispatch(interval, maxWait time.Duration) *Problem {
+	deadline := time.Now().UTC().Add(maxWait)
+	for {
+		g.mu.Lock()
+		now := time.Now().UTC()
+		if now.Before(g.pausedUntil) {
+			until := g.pausedUntil
+			g.mu.Unlock()
+			return pausedProblem(until)
+		}
+		var wait time.Duration
+		if interval > 0 && !g.last.IsZero() {
+			wait = g.last.Add(interval).Sub(now)
+		}
+		if wait <= 0 {
+			g.last = now
+			if next := now.Add(interval); next.After(g.next) {
+				g.next = next
+			}
+			g.mu.Unlock()
+			return nil
+		}
+		g.mu.Unlock()
+		if now.Add(wait).After(deadline) {
+			return intervalProblem(now.Add(wait))
+		}
+		time.Sleep(wait)
+	}
 }
 
-// markSent restarts the interval when a call is actually dispatched, after the
-// local checkpoint write, so disk latency cannot shorten the gap to the next
-// call reserved by the same caller.
-func (p *Provider) markSent() {
-	if p.MinIntervalMS <= 0 {
-		return
-	}
-	p.gate.mu.Lock()
-	if next := time.Now().UTC().Add(time.Duration(p.MinIntervalMS) * time.Millisecond); next.After(p.gate.next) {
-		p.gate.next = next
-	}
-	p.gate.mu.Unlock()
+func (p *Provider) reserve() *Problem {
+	return p.gate.reserve(p.interval(), time.Duration(p.TimeoutSeconds)*time.Second)
+}
+
+func (p *Provider) dispatch() *Problem {
+	return p.gate.dispatch(p.interval(), time.Duration(p.TimeoutSeconds)*time.Second)
+}
+
+func (p *Provider) interval() time.Duration {
+	return time.Duration(p.MinIntervalMS) * time.Millisecond
 }
 
 // blocked reports whether a non-2xx response matches a configured

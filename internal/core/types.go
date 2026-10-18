@@ -32,11 +32,8 @@ type Provider struct {
 	RetrySafe              bool              `json:"retry_safe,omitempty"`
 	AllowHTTPLoopback      bool              `json:"allow_http_loopback,omitempty"`
 	// Credential scope. These fields are part of the configuration hash.
-	CookieDomain        string   `json:"cookie_domain,omitempty"`
-	ProtectedCookies    []string `json:"protected_cookies,omitempty"`
-	JWTSubjectCookie    string   `json:"jwt_subject_cookie,omitempty"`
-	Authorization       string   `json:"authorization,omitempty"` // bearer (default), none, cookie_bearer
-	AuthorizationCookie string   `json:"authorization_cookie,omitempty"`
+	CookieDomain     string   `json:"cookie_domain,omitempty"`
+	ProtectedCookies []string `json:"protected_cookies,omitempty"`
 	// Egress and pacing. Operational only: excluded from the configuration hash.
 	Proxy                string           `json:"proxy,omitempty"`
 	ProxyEnv             string           `json:"proxy_env,omitempty"`
@@ -89,8 +86,6 @@ type Import struct {
 	AccessExpiresAt  time.Time         `json:"access_expires_at,omitempty"`
 	Secrets          map[string]string `json:"secrets,omitempty"`
 	Cookies          []ImportCookie    `json:"cookies,omitempty"`
-	CookieText       string            `json:"cookie_text,omitempty"`
-	CookieFormat     string            `json:"cookie_format,omitempty"`
 	Replace          bool              `json:"replace,omitempty"`
 	ExpectedRevision *uint64           `json:"expected_revision,omitempty"`
 }
@@ -123,7 +118,6 @@ type State struct {
 	RefreshToken    string            `json:"refresh_token,omitempty"`
 	Secrets         map[string]string `json:"secrets,omitempty"`
 	Cookies         []StoredCookie    `json:"cookies,omitempty"`
-	Subject         string            `json:"subject,omitempty"` // JWT sub of jwt_subject_cookie at import
 	PendingRequest  bool              `json:"pending_request,omitempty"`
 	PendingRefresh  bool              `json:"pending_refresh,omitempty"`
 	Failures        int               `json:"failures,omitempty"`
