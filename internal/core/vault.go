@@ -33,6 +33,9 @@ type Vault struct {
 	// saveHook is a test-only fault injection point, before replacing the file.
 	saveHook     func(*State) error
 	revisionHook func()
+	// pauseSyncHook is a test-only fault injection point standing in for the
+	// final directory sync, after the pause file was replaced or removed.
+	pauseSyncHook func() error
 }
 
 func DefaultDir() string {
@@ -259,11 +262,16 @@ func (v *Vault) open(b []byte, ad string) ([]byte, error) {
 }
 
 // SavePauses replaces the stored provider pauses. An empty map removes the file.
+// An error can come after the file already changed (a failed directory sync),
+// so callers that roll back must save the restored state again.
 func (v *Vault) SavePauses(pauses map[string]time.Time) error {
 	path := filepath.Join(v.dir, providerPausesFile)
 	if len(pauses) == 0 {
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 			return err
+		}
+		if v.pauseSyncHook != nil {
+			return v.pauseSyncHook()
 		}
 		return syncDir(v.dir)
 	}
@@ -275,7 +283,13 @@ func (v *Vault) SavePauses(pauses map[string]time.Time) error {
 	if err != nil {
 		return err
 	}
-	return atomicWrite(path, blob)
+	if err := atomicWrite(path, blob); err != nil {
+		return err
+	}
+	if v.pauseSyncHook != nil {
+		return v.pauseSyncHook()
+	}
+	return nil
 }
 
 // LoadPauses returns the stored provider pauses; none when the file is absent.

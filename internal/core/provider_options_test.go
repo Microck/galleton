@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -876,6 +877,41 @@ func TestPauseSurvivesRestart(t *testing.T) {
 	m = reopen()
 	if until := m.Providers()[0].PausedUntil; until.IsZero() || until.After(time.Now().Add(maxPause)) {
 		t.Fatalf("stored pause not clamped: %v", until)
+	}
+}
+
+func TestFailedResumeKeepsPauseOnDisk(t *testing.T) {
+	p := providerFor("http://127.0.0.1:9")
+	m, v, dir := managerFor(t, p)
+	if _, err := m.Pause("test", 600); err != nil {
+		t.Fatal(err)
+	}
+	// The pause file is removed, then the directory sync fails.
+	failed := false
+	v.pauseSyncHook = func() error {
+		if !failed {
+			failed = true
+			return errors.New("sync failed")
+		}
+		return nil
+	}
+	_, err := m.Resume("test")
+	wantCode(t, err, "storage_failure")
+	if m.Providers()[0].PausedUntil.IsZero() {
+		t.Fatal("pause lifted in memory after a failed resume")
+	}
+	v.Close()
+	reopened, err := OpenVault(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	restarted, err := NewManager(reopened, Config{Providers: []Provider{p}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restarted.Providers()[0].PausedUntil.IsZero() {
+		t.Fatal("a failed resume lifted the pause on disk")
 	}
 }
 

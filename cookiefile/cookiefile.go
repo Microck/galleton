@@ -89,8 +89,11 @@ func Detect(data []byte) string {
 }
 
 // Parse converts data in the given format (or Auto) into cookies. It returns
-// the format that was used.
-func Parse(data []byte, format string) ([]Cookie, string, error) {
+// the format that was used. With hosts, cookies whose domain matches none of
+// them are dropped while parsing, and MaxCookies counts only the cookies kept,
+// so a whole-browser export can be narrowed to one provider. Cookies without a
+// domain (a Cookie header) are always kept.
+func Parse(data []byte, format string, hosts ...string) ([]Cookie, string, error) {
 	format, err := NormalizeFormat(format)
 	if err != nil {
 		return nil, "", err
@@ -102,26 +105,60 @@ func Parse(data []byte, format string) ([]Cookie, string, error) {
 	if format == Auto {
 		format = Detect(data)
 	}
-	var out []Cookie
+	c := &collector{}
+	for _, h := range hosts {
+		c.hosts = append(c.hosts, strings.ToLower(h))
+	}
 	switch format {
 	case Netscape:
-		out, err = parseNetscape(string(data))
+		err = parseNetscape(string(data), c)
 	case JSON:
-		out, err = parseJSON(data)
+		err = parseJSON(data, c)
 	case Header:
-		out, err = parseHeader(string(data))
+		err = parseHeader(string(data), c)
 	}
 	if err != nil {
 		return nil, format, err
 	}
-	if len(out) == 0 {
+	if len(c.out) == 0 {
+		if len(hosts) > 0 {
+			return nil, format, fmt.Errorf("no cookies for %s in %s input", strings.Join(hosts, ", "), format)
+		}
 		return nil, format, fmt.Errorf("no cookies found in %s input", format)
 	}
-	return out, format, nil
+	return c.out, format, nil
 }
 
-func parseNetscape(text string) ([]Cookie, error) {
-	var out []Cookie
+// collector keeps the cookies that match its hosts, up to MaxCookies.
+type collector struct {
+	hosts []string
+	out   []Cookie
+}
+
+func (c *collector) add(ck Cookie) error {
+	if !c.wanted(ck) {
+		return nil
+	}
+	if len(c.out) == MaxCookies {
+		return errTooMany
+	}
+	c.out = append(c.out, ck)
+	return nil
+}
+
+func (c *collector) wanted(ck Cookie) bool {
+	if len(c.hosts) == 0 || ck.Domain == "" {
+		return true
+	}
+	for _, h := range c.hosts {
+		if h == ck.Domain || !ck.HostOnly && strings.HasSuffix(h, "."+ck.Domain) {
+			return true
+		}
+	}
+	return false
+}
+
+func parseNetscape(text string, out *collector) error {
 	for i, raw := range strings.Split(text, "\n") {
 		line := strings.TrimRight(raw, "\r")
 		httpOnly := false
@@ -132,16 +169,13 @@ func parseNetscape(text string) ([]Cookie, error) {
 		if strings.TrimSpace(line) == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-		if len(out) == MaxCookies {
-			return nil, errTooMany
-		}
 		fields := strings.Split(line, "\t")
 		if len(fields) < 7 {
 			// Some copy-paste paths turn tabs into spaces; the value is the remainder.
 			fields = strings.SplitN(strings.Join(strings.Fields(line), " "), " ", 7)
 		}
 		if len(fields) < 7 {
-			return nil, fmt.Errorf("cookies.txt line %d: expected 7 tab-separated fields", i+1)
+			return fmt.Errorf("cookies.txt line %d: expected 7 tab-separated fields", i+1)
 		}
 		if len(fields) > 7 {
 			fields[6] = strings.Join(fields[6:], "\t")
@@ -149,24 +183,26 @@ func parseNetscape(text string) ([]Cookie, error) {
 		domain := strings.TrimSpace(fields[0])
 		subdomains, err := netscapeBool(fields[1])
 		if err != nil {
-			return nil, fmt.Errorf("cookies.txt line %d: include-subdomains flag: %w", i+1, err)
+			return fmt.Errorf("cookies.txt line %d: include-subdomains flag: %w", i+1, err)
 		}
 		secure, err := netscapeBool(fields[3])
 		if err != nil {
-			return nil, fmt.Errorf("cookies.txt line %d: secure flag: %w", i+1, err)
+			return fmt.Errorf("cookies.txt line %d: secure flag: %w", i+1, err)
 		}
 		expiry, err := strconv.ParseFloat(strings.TrimSpace(fields[4]), 64)
 		if err != nil || math.IsNaN(expiry) || math.IsInf(expiry, 0) {
-			return nil, fmt.Errorf("cookies.txt line %d: invalid expiry", i+1)
+			return fmt.Errorf("cookies.txt line %d: invalid expiry", i+1)
 		}
 		c := Cookie{Name: strings.TrimSpace(fields[5]), Value: strings.TrimSpace(fields[6]), Path: strings.TrimSpace(fields[2]), Secure: secure, HTTPOnly: httpOnly, Expires: epoch(expiry)}
 		c.Domain, c.HostOnly = scope(domain, !subdomains && !strings.HasPrefix(domain, "."))
 		if c.Name == "" {
-			return nil, fmt.Errorf("cookies.txt line %d: empty cookie name", i+1)
+			return fmt.Errorf("cookies.txt line %d: empty cookie name", i+1)
 		}
-		out = append(out, c)
+		if err := out.add(c); err != nil {
+			return err
+		}
 	}
-	return out, nil
+	return nil
 }
 
 func netscapeBool(raw string) (bool, error) {
@@ -296,20 +332,17 @@ func sameSite(raw string) string {
 	return ""
 }
 
-// parseJSON streams the cookie array, so an export with millions of entries
-// fails at MaxCookies instead of being decoded whole first.
-func parseJSON(data []byte) ([]Cookie, error) {
+// parseJSON streams the cookie array, so memory holds only the cookies kept
+// and an oversized export fails at MaxCookies instead of being decoded whole.
+func parseJSON(data []byte, out *collector) error {
 	d := json.NewDecoder(bytes.NewReader(data))
 	start, err := d.Token()
 	if err != nil {
-		return nil, errors.New("invalid JSON cookie export")
+		return errors.New("invalid JSON cookie export")
 	}
-	var out []Cookie
 	switch start {
 	case json.Delim('['):
-		if out, err = decodeCookies(d, ""); err != nil {
-			return nil, err
-		}
+		return decodeCookies(d, "", out)
 	case json.Delim('{'):
 		// {"url": ..., "cookies": [...]}: the URL supplies a missing domain,
 		// so it must be known before the array is read.
@@ -318,70 +351,64 @@ func parseJSON(data []byte) ([]Cookie, error) {
 		for d.More() {
 			key, err := d.Token()
 			if err != nil {
-				return nil, errors.New("invalid JSON cookie export")
+				return errors.New("invalid JSON cookie export")
 			}
 			switch key {
 			case "url":
 				var raw string
 				if d.Decode(&raw) != nil {
-					return nil, errors.New("invalid url in JSON cookie export")
+					return errors.New("invalid url in JSON cookie export")
 				}
 				u, err := url.Parse(raw)
 				if err != nil || u.Hostname() == "" {
-					return nil, errors.New("invalid url in JSON cookie export")
+					return errors.New("invalid url in JSON cookie export")
 				}
 				host = strings.ToLower(u.Hostname())
 			case "cookies":
 				if d.Decode(&rawCookies) != nil {
-					return nil, errors.New("invalid JSON cookie export")
+					return errors.New("invalid JSON cookie export")
 				}
 			default:
 				var skip json.RawMessage
 				if d.Decode(&skip) != nil {
-					return nil, errors.New("invalid JSON cookie export")
+					return errors.New("invalid JSON cookie export")
 				}
 			}
 		}
 		if len(rawCookies) == 0 {
-			return nil, errors.New(`JSON cookie export needs an array or an object with a "cookies" array`)
+			return errors.New(`JSON cookie export needs an array or an object with a "cookies" array`)
 		}
 		inner := json.NewDecoder(bytes.NewReader(rawCookies))
 		if t, err := inner.Token(); err != nil || t != json.Delim('[') {
-			return nil, errors.New(`JSON cookie export needs an array or an object with a "cookies" array`)
+			return errors.New(`JSON cookie export needs an array or an object with a "cookies" array`)
 		}
-		if out, err = decodeCookies(inner, host); err != nil {
-			return nil, err
-		}
-	default:
-		return nil, errors.New(`JSON cookie export needs an array or an object with a "cookies" array`)
+		return decodeCookies(inner, host, out)
 	}
-	return out, nil
+	return errors.New(`JSON cookie export needs an array or an object with a "cookies" array`)
 }
 
 // decodeCookies reads array elements after the opening bracket.
-func decodeCookies(d *json.Decoder, defaultHost string) ([]Cookie, error) {
-	var out []Cookie
+func decodeCookies(d *json.Decoder, defaultHost string, out *collector) error {
 	for d.More() {
-		if len(out) == MaxCookies {
-			return nil, errTooMany
-		}
 		var j jsonCookie
 		if err := d.Decode(&j); err != nil {
-			return nil, errors.New("invalid JSON cookie entry")
+			return errors.New("invalid JSON cookie entry")
 		}
 		c, err := j.cookie(defaultHost)
 		if err != nil {
-			return nil, err
+			return err
 		}
-		out = append(out, c)
+		if err := out.add(c); err != nil {
+			return err
+		}
 	}
 	if _, err := d.Token(); err != nil {
-		return nil, errors.New("invalid JSON cookie array")
+		return errors.New("invalid JSON cookie array")
 	}
-	return out, nil
+	return nil
 }
 
-func parseHeader(text string) ([]Cookie, error) {
+func parseHeader(text string, out *collector) error {
 	var parts []string
 	for _, line := range strings.Split(text, "\n") {
 		line = strings.TrimSpace(line)
@@ -395,24 +422,26 @@ func parseHeader(text string) ([]Cookie, error) {
 	}
 	header := strings.Join(parts, "; ")
 	if strings.Count(header, ";") >= MaxCookies {
-		return nil, errTooMany
+		return errTooMany
 	}
 	parsed, err := http.ParseCookie(header)
 	if err != nil {
-		return nil, errors.New("invalid Cookie header")
+		return errors.New("invalid Cookie header")
 	}
-	out := make([]Cookie, 0, len(parsed))
 	for _, c := range parsed {
-		out = append(out, Cookie{Name: c.Name, Value: c.Value})
+		if err := out.add(Cookie{Name: c.Name, Value: c.Value}); err != nil {
+			return err
+		}
 	}
-	return out, nil
+	return nil
 }
 
-// Read reads at most MaxInput bytes from r and parses them.
-func Read(r io.Reader, format string) ([]Cookie, string, error) {
+// Read reads at most MaxInput bytes from r and parses them; hosts filter the
+// result as in Parse.
+func Read(r io.Reader, format string, hosts ...string) ([]Cookie, string, error) {
 	data, err := io.ReadAll(io.LimitReader(r, MaxInput+1))
 	if err != nil {
 		return nil, "", err
 	}
-	return Parse(data, format)
+	return Parse(data, format, hosts...)
 }

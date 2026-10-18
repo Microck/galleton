@@ -12,9 +12,11 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -165,16 +167,20 @@ func run(args []string) error {
 				input.Replace = true
 				input.ExpectedRevision = expectedRevision
 			}
+			if input.Provider == "" {
+				return errors.New("connect needs a provider: use --provider or a credentials JSON object")
+			}
 			if *cookies != "" {
-				parsed, used, err := readCookies(*cookies, *format)
+				hosts, err := providerHosts(ctx, c, input.Provider)
+				if err != nil {
+					return err
+				}
+				parsed, used, err := readCookies(*cookies, *format, hosts)
 				if err != nil {
 					return err
 				}
 				input.Cookies = append(input.Cookies, parsed...)
-				fmt.Fprintf(os.Stderr, "Parsed %d cookies (%s); the daemon keeps only those for the provider's origins.\n", len(parsed), used)
-			}
-			if input.Provider == "" {
-				return errors.New("connect needs a provider: use --provider or a credentials JSON object")
+				fmt.Fprintf(os.Stderr, "Kept %d cookies (%s) for %s.\n", len(parsed), used, strings.Join(hosts, ", "))
 			}
 			out, err = c.Connect(ctx, id, input)
 		case "status":
@@ -226,9 +232,33 @@ func readCredentials(path string) (client.Credentials, error) {
 	return input, nil
 }
 
-// readCookies parses a cookie export locally; only the structured cookies are
-// sent to the daemon.
-func readCookies(path, format string) ([]cookiefile.Cookie, string, error) {
+// providerHosts returns the host names of a provider's origins, so a
+// whole-browser export is narrowed before it is sent to the daemon.
+func providerHosts(ctx context.Context, c *client.Client, name string) ([]string, error) {
+	providers, err := c.Providers(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, p := range providers {
+		if p.Name != name {
+			continue
+		}
+		var hosts []string
+		for _, origin := range p.Origins {
+			u, err := url.Parse(origin)
+			if err != nil || u.Hostname() == "" {
+				return nil, fmt.Errorf("provider %s lists an invalid origin", name)
+			}
+			hosts = append(hosts, strings.ToLower(u.Hostname()))
+		}
+		return hosts, nil
+	}
+	return nil, fmt.Errorf("unknown provider %q; see galleton providers", name)
+}
+
+// readCookies parses a cookie export locally and keeps only cookies for the
+// given hosts; only those are sent to the daemon, which filters again.
+func readCookies(path, format string, hosts []string) ([]cookiefile.Cookie, string, error) {
 	var source io.Reader = os.Stdin
 	if path != "-" {
 		file, err := os.Open(path)
@@ -238,7 +268,7 @@ func readCookies(path, format string) ([]cookiefile.Cookie, string, error) {
 		defer file.Close()
 		source = file
 	}
-	cookies, used, err := cookiefile.Read(source, format)
+	cookies, used, err := cookiefile.Read(source, format, hosts...)
 	if err != nil {
 		return nil, used, fmt.Errorf("cookie export: %w", err)
 	}

@@ -957,7 +957,11 @@ func (m *Manager) Resume(provider string) (ProviderPause, error) {
 	p.gate.resume()
 	if err := m.savePauses(); err != nil {
 		if paused {
+			// The file may already be gone even though the save failed, so
+			// write the restored pause back. If that fails too, the pause
+			// still holds until the daemon restarts.
 			p.gate.pause(previous)
+			_ = m.savePauses()
 		}
 		return ProviderPause{}, problem(503, "storage_failure", "The pause could not be cleared on disk, so it stays in effect.")
 	}

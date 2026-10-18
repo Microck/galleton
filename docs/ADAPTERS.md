@@ -179,7 +179,7 @@ While paused, managed requests fail with `provider_paused` and a `retry_at`, the
 
 A host-only cookie is stored for each listed origin on that host. A domain cookie equal to `cookie_domain` keeps that scope; other domain cookies are copied host-only onto each listed origin inside the domain. A `__Host-` cookie that names a domain is rejected. When several fields are supplied, later ones win: `cookie_header`, then `set_cookies`, then `cookies`.
 
-The daemon does not parse browser export files. The CLI does, locally, and sends structured `cookies`; the Go package `github.com/Microck/galleton/cookiefile` exposes the same parser. It reads, up to 16 MiB and 4096 cookies:
+The daemon does not parse browser export files. The CLI does, locally: it asks the daemon for the provider's origins, keeps only cookies whose domain matches one of their hosts (cookies without a domain, from a `Cookie:` header, are kept), and sends those as structured `cookies`. The daemon filters again. The Go package `github.com/Microck/galleton/cookiefile` exposes the same parser; pass host names to `Parse` or `Read` to filter. It reads up to 16 MiB and keeps at most 4096 cookies, counted after filtering, so a whole-browser export works:
 
 - Netscape `cookies.txt`: tab-separated, `#HttpOnly_` lines set HttpOnly, expiry 0 is a session cookie
 - Cookie-Editor or EditThisCookie JSON, as an array or a `{"url": ..., "cookies": [...]}` wrapper: `hostOnly`, `expirationDate` and `sameSite` are honored, and the wrapper's URL supplies a missing domain. DevTools and Playwright cookie lists have the same shape: without `hostOnly`, a leading dot marks a domain cookie, and `expires: -1` is a session cookie
