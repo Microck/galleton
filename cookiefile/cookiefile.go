@@ -342,7 +342,10 @@ func parseJSON(data []byte, out *collector) error {
 	}
 	switch start {
 	case json.Delim('['):
-		return decodeCookies(d, "", out)
+		if err := decodeCookies(d, "", out); err != nil {
+			return err
+		}
+		return endOfJSON(d)
 	case json.Delim('{'):
 		// {"url": ..., "cookies": [...]}: the URL supplies a missing domain,
 		// so it must be known before the array is read.
@@ -375,6 +378,12 @@ func parseJSON(data []byte, out *collector) error {
 				}
 			}
 		}
+		if t, err := d.Token(); err != nil || t != json.Delim('}') {
+			return errors.New("invalid JSON cookie export")
+		}
+		if err := endOfJSON(d); err != nil {
+			return err
+		}
 		if len(rawCookies) == 0 {
 			return errors.New(`JSON cookie export needs an array or an object with a "cookies" array`)
 		}
@@ -385,6 +394,15 @@ func parseJSON(data []byte, out *collector) error {
 		return decodeCookies(inner, host, out)
 	}
 	return errors.New(`JSON cookie export needs an array or an object with a "cookies" array`)
+}
+
+// endOfJSON rejects anything after the export's single top-level value, so
+// a truncated or concatenated file is not imported as if it were complete.
+func endOfJSON(d *json.Decoder) error {
+	if _, err := d.Token(); err != io.EOF {
+		return errors.New("unexpected data after the JSON cookie export")
+	}
+	return nil
 }
 
 // decodeCookies reads array elements after the opening bracket.

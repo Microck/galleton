@@ -177,7 +177,8 @@ func TestFormatOverrideAndErrors(t *testing.T) {
 			t.Fatalf("format %s accepted", gone)
 		}
 	}
-	for _, bad := range []string{"", "[]", `{"nothing":1}`, `[{"value":"x"}]`, `{"cookies":{}}`, `[{"name":"a","value":"b"}`} {
+	for _, bad := range []string{"", "[]", `{"nothing":1}`, `[{"value":"x"}]`, `{"cookies":{}}`, `[{"name":"a","value":"b"}`,
+		`{"cookies":[{"name":"a","value":"b"}]`, `{"cookies":[{"name":"a","value":"b"}]} []`, `[{"name":"a","value":"b"}] {"x":1}`} {
 		if _, _, err := Parse([]byte(bad), Auto); err == nil {
 			t.Fatalf("accepted %q", bad)
 		}
