@@ -478,9 +478,8 @@ func (m *Manager) ensure(e *entry, force bool) error {
 	}
 	// Build before journaling so missing credentials or bad templates don't create
 	// an ambiguous network outcome. Client disconnects cannot interrupt persistence.
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(p.TimeoutSeconds)*time.Second)
-	defer cancel()
-	req, err := makeRefreshRequest(ctx, s, p)
+	// performRefresh starts the upstream timeout once the call is admitted.
+	req, err := makeRefreshRequest(context.Background(), s, p)
 	if err != nil {
 		n := cloneState(s)
 		n.Status = "configuration_error"
@@ -733,9 +732,8 @@ func (m *Manager) Request(id string, in RequestInput) (RequestResult, error) {
 	for k, v := range auth.Headers {
 		headers.Set(k, v)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(p.TimeoutSeconds)*time.Second)
-	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, method, u.String(), bytes.NewReader(body))
+	// The upstream timeout starts once the call is admitted, after pacing.
+	req, err := http.NewRequestWithContext(context.Background(), method, u.String(), bytes.NewReader(body))
 	if err != nil {
 		return RequestResult{}, invalid("Invalid upstream request.")
 	}
@@ -773,6 +771,8 @@ func (m *Manager) Request(id string, in RequestInput) (RequestResult, error) {
 		}
 		return RequestResult{}, wait
 	}
+	req, cancel := p.withDeadline(req)
+	defer cancel()
 	resp, err := p.resource.Do(req)
 	if err != nil {
 		if connected.Load() {

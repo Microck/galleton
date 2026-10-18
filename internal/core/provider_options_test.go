@@ -585,6 +585,7 @@ func TestRequireSetCookieNeedsEveryProtectedCookieReplaced(t *testing.T) {
 		{"unrelated cookie only", []*http.Cookie{{Name: "datadome", Value: "d1", Path: "/"}}, true},
 		{"one of two", []*http.Cookie{{Name: "datadome", Value: "d1", Path: "/"}, {Name: "refresh", Value: "r1", Path: "/"}}, true},
 		{"deletion is not a replacement", []*http.Cookie{{Name: "access", Value: "a1", Path: "/"}, {Name: "refresh", Value: "", Path: "/", MaxAge: -1}}, true},
+		{"same name on another path", []*http.Cookie{{Name: "access", Value: "a1", Path: "/"}, {Name: "refresh", Value: "r1", Path: "/other"}}, true},
 		{"both rotated", []*http.Cookie{{Name: "access", Value: "a1", Path: "/"}, {Name: "refresh", Value: "r1", Path: "/"}}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -912,6 +913,30 @@ func TestPauseStopsCallQueuedBehindInterval(t *testing.T) {
 	states, err := v.LoadAll()
 	if err != nil || states[0].PendingRequest {
 		t.Fatalf("refused call left its checkpoint: %v", err)
+	}
+}
+
+func TestPacingWaitDoesNotEatUpstreamTimeout(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(400 * time.Millisecond)
+		fmt.Fprint(w, "ok")
+	}))
+	defer server.Close()
+	p := providerFor(server.URL)
+	p.TimeoutSeconds = 1
+	p.MinIntervalMS = 900
+	m, _, _ := managerFor(t, p)
+	if _, err := m.Import("alice", Import{Provider: "test", AccessToken: "a0", RefreshToken: "r0"}); err != nil {
+		t.Fatal(err)
+	}
+	e, _ := m.get("alice")
+	e.state.NextRefresh = time.Now().Add(time.Hour)
+	// The second call waits about 900 ms for its slot and then needs 400 ms
+	// upstream: within the 1 s timeout only if the timeout starts after pacing.
+	for _, path := range []string{"/one", "/two"} {
+		if _, err := m.Request("alice", RequestInput{URL: server.URL + path}); err != nil {
+			t.Fatalf("%s: %v", path, err)
+		}
 	}
 }
 

@@ -264,6 +264,8 @@ func performRefresh(s *State, p *Provider, client *http.Client, req *http.Reques
 	if wait := p.dispatch(); wait != nil {
 		return wait
 	}
+	req, cancel := p.withDeadline(req)
+	defer cancel()
 	resp, err := client.Do(req)
 	if err != nil {
 		if !connected.Load() {
@@ -277,7 +279,6 @@ func performRefresh(s *State, p *Provider, client *http.Client, req *http.Reques
 	retained := 0
 	var cookieProblem *Problem
 	held := protectedHeld(s.Cookies, p.protected, now)
-	replaced := map[string]bool{}
 	if lines := resp.Header.Values("Set-Cookie"); len(lines) > 0 {
 		cookies, rejected := parseSetCookiesPartial(lines)
 		if rejected {
@@ -286,11 +287,6 @@ func performRefresh(s *State, p *Provider, client *http.Client, req *http.Reques
 		if !success2xx {
 			// Only a successful renewal may replace protected credential cookies.
 			cookies = withoutProtected(cookies, p.protected)
-		}
-		for _, c := range cookies {
-			if p.protected[c.Name] && c.Value != "" && c.MaxAge >= 0 && (c.Expires.IsZero() || c.Expires.After(now)) {
-				replaced[c.Name] = true
-			}
 		}
 		if len(cookies) > 0 {
 			var updated []StoredCookie
@@ -410,15 +406,11 @@ func performRefresh(s *State, p *Provider, client *http.Client, req *http.Reques
 	if mapping.RequireSetCookie && retained == 0 {
 		return problem(502, "protocol_error", "The adapter requires a valid Set-Cookie renewal response.")
 	}
-	if mapping.RequireSetCookie {
-		// An unrelated cookie is not renewal evidence: every protected cookie
-		// the session held must be replaced, or the next renewal would send a
-		// refresh cookie the provider may already have consumed.
-		for name := range held {
-			if !replaced[name] {
-				return problem(502, "protocol_error", "The renewal response did not replace every protected credential cookie.")
-			}
-		}
+	if mapping.RequireSetCookie && !protectedSuperseded(held, s.Cookies, now) {
+		// An unrelated cookie, or the same name on another path, is not
+		// renewal evidence: the next renewal would still send a refresh
+		// cookie the provider may already have consumed.
+		return problem(502, "protocol_error", "The renewal response did not replace every protected credential cookie.")
 	}
 	if !hasToken && retained == 0 && !success {
 		return problem(502, "protocol_error", "No renewal evidence: configure a token field, a success field, or require replacement cookies.")
@@ -426,14 +418,38 @@ func performRefresh(s *State, p *Provider, client *http.Client, req *http.Reques
 	return nil
 }
 
-// protectedHeld returns the protected cookie names that are still live in
-// cookies, so they would be sent again by the next renewal.
-func protectedHeld(cookies []StoredCookie, protected map[string]bool, now time.Time) map[string]bool {
-	held := map[string]bool{}
+// protectedHeld returns the live protected cookies, which the next renewal
+// would send again.
+func protectedHeld(cookies []StoredCookie, protected map[string]bool, now time.Time) []StoredCookie {
+	var held []StoredCookie
 	for _, c := range cookies {
 		if protected[c.Cookie.Name] && (c.Cookie.Expires.IsZero() || c.Cookie.Expires.After(now)) {
-			held[c.Cookie.Name] = true
+			held = append(held, c)
 		}
 	}
 	return held
+}
+
+// protectedSuperseded reports whether every held cookie was replaced by a new
+// live cookie with the same name and path that is sent where it was sent. A
+// held cookie still stored unchanged was not replaced, and one that is gone
+// without such a successor was deleted.
+func protectedSuperseded(held, current []StoredCookie, now time.Time) bool {
+	for _, h := range held {
+		successor := false
+		for _, c := range current {
+			if c.Origin == h.Origin && c.Domain == h.Domain && c.Cookie.Name == h.Cookie.Name && c.Cookie.Path == h.Cookie.Path && c.Cookie.Value == h.Cookie.Value && c.Cookie.Expires.Equal(h.Cookie.Expires) {
+				return false
+			}
+			live := c.Cookie.Value != "" && (c.Cookie.Expires.IsZero() || c.Cookie.Expires.After(now))
+			sameTarget := c.Domain == "" && c.Origin == h.Origin || c.Domain != "" && domainMatch(originHost(h.Origin), c.Domain)
+			if live && sameTarget && c.Cookie.Name == h.Cookie.Name && c.Cookie.Path == h.Cookie.Path {
+				successor = true
+			}
+		}
+		if !successor {
+			return false
+		}
+	}
+	return true
 }

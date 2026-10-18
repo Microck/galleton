@@ -2,6 +2,7 @@ package core
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
 	"errors"
 	"net"
@@ -181,6 +182,13 @@ func (p *Provider) dispatch() *Problem {
 
 func (p *Provider) interval() time.Duration {
 	return time.Duration(p.MinIntervalMS) * time.Millisecond
+}
+
+// withDeadline starts the upstream timeout once a call has been admitted, so
+// time spent waiting for its pacing slot does not eat into it.
+func (p *Provider) withDeadline(req *http.Request) (*http.Request, context.CancelFunc) {
+	ctx, cancel := context.WithTimeout(req.Context(), time.Duration(p.TimeoutSeconds)*time.Second)
+	return req.WithContext(ctx), cancel
 }
 
 // blocked reports whether a non-2xx response matches a configured
