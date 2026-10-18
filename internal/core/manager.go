@@ -53,14 +53,26 @@ func NewManager(v *Vault, c Config) (*Manager, error) {
 		return nil, err
 	}
 	now := time.Now().UTC()
+	normalized := false
 	for name, until := range pauses {
 		// Pauses of removed providers lapse. A clock moved backwards cannot
 		// stretch a pause past its maximum length.
-		if p := providers[name]; p != nil && until.After(now) {
-			if limit := now.Add(maxPause); until.After(limit) {
-				until = limit
-			}
-			p.gate.pause(until)
+		p := providers[name]
+		if p == nil || !until.After(now) {
+			normalized = true
+			continue
+		}
+		if limit := now.Add(maxPause); until.After(limit) {
+			until = limit
+			normalized = true
+		}
+		p.gate.pause(until)
+	}
+	// Save the bounded set, so restarts cannot keep re-clamping a far-future
+	// deadline to a fresh 24 hours.
+	if normalized {
+		if err := m.savePauses(); err != nil {
+			return nil, err
 		}
 	}
 	for _, s := range states {
@@ -481,6 +493,7 @@ func (m *Manager) ensure(e *entry, force bool) error {
 	// performRefresh starts the upstream timeout once the call is admitted.
 	req, err := makeRefreshRequest(context.Background(), s, p)
 	if err != nil {
+		p.release()
 		n := cloneState(s)
 		n.Status = "configuration_error"
 		n.LastError = problem(409, "configuration_error", "Missing refresh credentials or invalid adapter template.")
@@ -494,6 +507,7 @@ func (m *Manager) ensure(e *entry, force bool) error {
 	pending.PendingRefresh = true
 	pending.Status = "refreshing"
 	if err = m.vault.Save(pending); err != nil {
+		p.release()
 		return storageProblem()
 	} // No request was sent.
 	e.state = pending
@@ -770,6 +784,7 @@ func (m *Manager) Request(id string, in RequestInput) (RequestResult, error) {
 	pending := cloneState(e.state)
 	pending.PendingRequest = true
 	if err := m.vault.Save(pending); err != nil {
+		p.release()
 		return RequestResult{}, storageProblem()
 	}
 	e.state = pending

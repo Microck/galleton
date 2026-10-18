@@ -187,6 +187,13 @@ func (p *Provider) reserve() *Problem {
 	return p.gate.reserve(p.interval(), time.Duration(p.TimeoutSeconds)*time.Second)
 }
 
+// release gives back a reserved slot when a call ends before dispatch.
+func (p *Provider) release() {
+	p.gate.mu.Lock()
+	p.gate.release(p.interval())
+	p.gate.mu.Unlock()
+}
+
 func (p *Provider) dispatch() *Problem {
 	return p.gate.dispatch(p.interval(), time.Duration(p.TimeoutSeconds)*time.Second)
 }

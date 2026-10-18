@@ -878,6 +878,10 @@ func TestPauseSurvivesRestart(t *testing.T) {
 	if until := m.Providers()[0].PausedUntil; until.IsZero() || until.After(time.Now().Add(maxPause)) {
 		t.Fatalf("stored pause not clamped: %v", until)
 	}
+	stored, err := v.LoadPauses()
+	if err != nil || len(stored) != 1 || stored["test"].After(time.Now().Add(maxPause)) {
+		t.Fatalf("clamped pause not saved: %v %v", err, stored)
+	}
 }
 
 func TestFailedResumeKeepsPauseOnDisk(t *testing.T) {
