@@ -6,7 +6,9 @@ import (
 )
 
 func optionalTime(t time.Time) *time.Time {
-	if t.IsZero() { return nil }
+	if t.IsZero() {
+		return nil
+	}
 	return &t
 }
 
@@ -16,8 +18,8 @@ func (s State) MarshalJSON() ([]byte, error) {
 	type plain State
 	return json.Marshal(struct {
 		*plain
-		LastRefresh *time.Time `json:"last_refresh,omitempty"`
-		NextRefresh *time.Time `json:"next_refresh,omitempty"`
+		LastRefresh     *time.Time `json:"last_refresh,omitempty"`
+		NextRefresh     *time.Time `json:"next_refresh,omitempty"`
 		AccessExpiresAt *time.Time `json:"access_expires_at,omitempty"`
 	}{(*plain)(&s), optionalTime(s.LastRefresh), optionalTime(s.NextRefresh), optionalTime(s.AccessExpiresAt)})
 }
@@ -26,8 +28,8 @@ func (s Metadata) MarshalJSON() ([]byte, error) {
 	type plain Metadata
 	return json.Marshal(struct {
 		*plain
-		LastRefresh *time.Time `json:"last_refresh,omitempty"`
-		NextRefresh *time.Time `json:"next_refresh,omitempty"`
+		LastRefresh     *time.Time `json:"last_refresh,omitempty"`
+		NextRefresh     *time.Time `json:"next_refresh,omitempty"`
 		AccessExpiresAt *time.Time `json:"access_expires_at,omitempty"`
 	}{(*plain)(&s), optionalTime(s.LastRefresh), optionalTime(s.NextRefresh), optionalTime(s.AccessExpiresAt)})
 }
@@ -46,4 +48,20 @@ func (h HeadersResult) MarshalJSON() ([]byte, error) {
 		*plain
 		ExpiresAt *time.Time `json:"expires_at,omitempty"`
 	}{(*plain)(&h), optionalTime(h.ExpiresAt)})
+}
+
+func (p ProviderInfo) MarshalJSON() ([]byte, error) {
+	type plain ProviderInfo
+	return json.Marshal(struct {
+		*plain
+		PausedUntil *time.Time `json:"paused_until,omitempty"`
+	}{(*plain)(&p), optionalTime(p.PausedUntil)})
+}
+
+func (p ProviderPause) MarshalJSON() ([]byte, error) {
+	type plain ProviderPause
+	return json.Marshal(struct {
+		*plain
+		PausedUntil *time.Time `json:"paused_until,omitempty"`
+	}{(*plain)(&p), optionalTime(p.PausedUntil)})
 }

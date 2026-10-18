@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net/http"
 	"time"
+
+	"github.com/Microck/galleton/cookiefile"
 )
 
 const Version = "0.1.0"
@@ -29,8 +31,36 @@ type Provider struct {
 	TimeoutSeconds         int               `json:"timeout_seconds,omitempty"`
 	RetrySafe              bool              `json:"retry_safe,omitempty"`
 	AllowHTTPLoopback      bool              `json:"allow_http_loopback,omitempty"`
-	secret                 string
-	hash                   string
+	// Credential scope. These fields are part of the configuration hash.
+	CookieDomain     string   `json:"cookie_domain,omitempty"`
+	ProtectedCookies []string `json:"protected_cookies,omitempty"`
+	// Egress and pacing. Operational only: excluded from the configuration hash.
+	Proxy                string           `json:"proxy,omitempty"`
+	ProxyEnv             string           `json:"proxy_env,omitempty"`
+	KeepAlive            bool             `json:"keep_alive,omitempty"`
+	MinIntervalMS        int              `json:"min_interval_ms,omitempty"`
+	MaxRequestBodyBytes  int64            `json:"max_request_body_bytes,omitempty"`
+	MaxResponseBodyBytes int64            `json:"max_response_body_bytes,omitempty"`
+	BlockSignatures      []BlockSignature `json:"block_signatures,omitempty"`
+	secret               string
+	hash                 string
+	cookieDomain         string // normalized CookieDomain, without a leading dot
+	protected            map[string]bool
+	maxRequest           int64
+	maxResponse          int64
+	resource             *http.Client // managed requests; pooled when KeepAlive
+	renewal              *http.Client // renewals; always a fresh connection
+	gate                 *gate
+}
+
+// BlockSignature recognizes a bot-protection refusal (a challenge page, not a
+// provider decision about the credential). Every configured matcher must hold.
+type BlockSignature struct {
+	Status         []int  `json:"status"`
+	BodyContains   string `json:"body_contains,omitempty"`
+	Header         string `json:"header,omitempty"`
+	HeaderContains string `json:"header_contains,omitempty"`
+	NotJSON        bool   `json:"not_json,omitempty"`
 }
 
 type ResponseMapping struct {
@@ -55,16 +85,22 @@ type Import struct {
 	RefreshToken     string            `json:"refresh_token,omitempty"`
 	AccessExpiresAt  time.Time         `json:"access_expires_at,omitempty"`
 	Secrets          map[string]string `json:"secrets,omitempty"`
+	Cookies          []ImportCookie    `json:"cookies,omitempty"`
 	Replace          bool              `json:"replace,omitempty"`
 	ExpectedRevision *uint64           `json:"expected_revision,omitempty"`
 }
 
-// StoredCookie is deliberately pinned to the exact issuing origin, including port.
-// Parent-domain cookies are narrowed, not widened, during import/capture.
+// ImportCookie is a structured cookie, as produced by package cookiefile.
+type ImportCookie = cookiefile.Cookie
+
+// StoredCookie is pinned to the exact issuing origin, including port. Domain
+// is set only for cookies scoped to the adapter's declared cookie_domain; those
+// match the listed origins inside that domain and no others.
 type StoredCookie struct {
 	Origin    string      `json:"origin"`
 	Cookie    http.Cookie `json:"cookie"`
 	CreatedAt time.Time   `json:"created_at"`
+	Domain    string      `json:"domain,omitempty"`
 }
 
 type State struct {

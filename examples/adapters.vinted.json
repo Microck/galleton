@@ -1,0 +1,29 @@
+{
+  "providers": [
+    {
+      "name": "vinted",
+      "kind": "http",
+      "origins": ["https://www.vinted.com", "https://api.www.vinted.com"],
+      "refresh_url": "https://www.vinted.com/web/api/auth/refresh",
+      "refresh_method": "POST",
+      "body_format": "json",
+      "response": {
+        "expires_in_pointer": "/expires_in",
+        "require_set_cookie": true
+      },
+      "refresh_interval_seconds": 3600,
+      "refresh_before_seconds": 300,
+      "cookie_domain": ".www.vinted.com",
+      "protected_cookies": ["access_token_web", "refresh_token_web"],
+      "block_signatures": [
+        {"status": [403], "body_contains": "captcha-delivery.com"},
+        {"status": [403, 503], "header": "Cf-Mitigated", "header_contains": "challenge"},
+        {"status": [403], "not_json": true}
+      ],
+      "min_interval_ms": 1000,
+      "keep_alive": true,
+      "max_request_body_bytes": 33554432,
+      "max_response_body_bytes": 8388608
+    }
+  ]
+}

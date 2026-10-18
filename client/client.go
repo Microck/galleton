@@ -17,6 +17,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/Microck/galleton/cookiefile"
 )
 
 type Client struct {
@@ -46,16 +48,32 @@ type Metadata struct {
 	Error           *Error    `json:"error,omitempty"`
 }
 type Credentials struct {
-	Provider        string            `json:"provider"`
-	CookieOrigin    string            `json:"cookie_origin,omitempty"`
-	CookieHeader    string            `json:"cookie_header,omitempty"`
-	SetCookies      []string          `json:"set_cookies,omitempty"`
-	AccessToken     string            `json:"access_token,omitempty"`
-	RefreshToken    string            `json:"refresh_token,omitempty"`
-	AccessExpiresAt *time.Time        `json:"access_expires_at,omitempty"`
-	Secrets         map[string]string `json:"secrets,omitempty"`
-	Replace         bool              `json:"replace,omitempty"`
-	ExpectedRevision *uint64          `json:"expected_revision,omitempty"`
+	Provider         string              `json:"provider"`
+	CookieOrigin     string              `json:"cookie_origin,omitempty"`
+	CookieHeader     string              `json:"cookie_header,omitempty"`
+	SetCookies       []string            `json:"set_cookies,omitempty"`
+	Cookies          []cookiefile.Cookie `json:"cookies,omitempty"`
+	AccessToken      string              `json:"access_token,omitempty"`
+	RefreshToken     string              `json:"refresh_token,omitempty"`
+	AccessExpiresAt  *time.Time          `json:"access_expires_at,omitempty"`
+	Secrets          map[string]string   `json:"secrets,omitempty"`
+	Replace          bool                `json:"replace,omitempty"`
+	ExpectedRevision *uint64             `json:"expected_revision,omitempty"`
+}
+
+// Provider is the non-secret view of a configured provider.
+type Provider struct {
+	Name        string     `json:"name"`
+	Kind        string     `json:"kind"`
+	Origins     []string   `json:"origins"`
+	Proxied     bool       `json:"proxied"`
+	PausedUntil *time.Time `json:"paused_until,omitempty"`
+}
+
+// Pause is the state of a provider pause after setting or clearing it.
+type Pause struct {
+	Provider    string     `json:"provider"`
+	PausedUntil *time.Time `json:"paused_until,omitempty"`
 }
 type Headers struct {
 	Headers   map[string]string `json:"headers"`
@@ -95,16 +113,60 @@ func FromDir(baseURL, dir string) (*Client, error) {
 	}
 	return New(baseURL, string(b))
 }
-func idPath(id string) (string, error) {
+
+// maxDaemonResponse covers a 64 MiB managed response in base64 plus headers.
+const maxDaemonResponse = 128 << 20
+
+func checkName(id, what string) error {
 	if len(id) < 1 || len(id) > 64 {
-		return "", errors.New("invalid session ID")
+		return errors.New("invalid " + what)
 	}
 	for _, r := range id {
 		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-' || r == '_') {
-			return "", errors.New("invalid session ID")
+			return errors.New("invalid " + what)
 		}
 	}
+	return nil
+}
+func idPath(id string) (string, error) {
+	if err := checkName(id, "session ID"); err != nil {
+		return "", err
+	}
 	return "/v1/sessions/" + id, nil
+}
+
+// Providers lists configured providers without secrets or proxy URLs.
+func (c *Client) Providers(ctx context.Context) ([]Provider, error) {
+	var out struct {
+		Providers []Provider `json:"providers"`
+	}
+	err := c.call(ctx, "GET", "/v1/providers", nil, &out)
+	return out.Providers, err
+}
+
+// Pause stops managed requests and renewals for a provider for 1–86400
+// seconds, for example after the application sees a bot-protection block.
+// It only extends an existing pause.
+func (c *Client) Pause(ctx context.Context, provider string, seconds int) (Pause, error) {
+	var out Pause
+	if err := checkName(provider, "provider name"); err != nil {
+		return out, err
+	}
+	if seconds < 1 || seconds > 86400 {
+		return out, errors.New("pause seconds must be 1-86400")
+	}
+	err := c.call(ctx, "POST", "/v1/providers/"+provider+"/pause", map[string]int{"seconds": seconds}, &out)
+	return out, err
+}
+
+// Resume clears a provider pause.
+func (c *Client) Resume(ctx context.Context, provider string) (Pause, error) {
+	var out Pause
+	if err := checkName(provider, "provider name"); err != nil {
+		return out, err
+	}
+	err := c.call(ctx, "DELETE", "/v1/providers/"+provider+"/pause", nil, &out)
+	return out, err
 }
 func (c *Client) call(ctx context.Context, method, path string, in, out any) error {
 	var body []byte
@@ -126,12 +188,12 @@ func (c *Client) call(ctx context.Context, method, path string, in, out any) err
 		return errors.New("galleton daemon is unavailable or the local request timed out")
 	}
 	defer resp.Body.Close()
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, (8<<20)+1))
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxDaemonResponse+1))
 	if err != nil {
 		return &Error{Code: "daemon_unavailable", Message: "Galleton response was interrupted; the request may already have completed.", Status: resp.StatusCode}
 	}
-	if len(raw) > 8<<20 {
-		return &Error{Code: "invalid_response", Message: "Galleton response exceeds the 8 MiB limit.", Status: resp.StatusCode}
+	if len(raw) > maxDaemonResponse {
+		return &Error{Code: "invalid_response", Message: "Galleton response exceeds the 128 MiB limit.", Status: resp.StatusCode}
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		var envelope struct {

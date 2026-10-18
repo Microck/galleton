@@ -400,7 +400,7 @@ func TestRefreshHeaderDefaultsPreserveAdapterValues(t *testing.T) {
 	}{
 		{"defaults", nil, "application/json", "Galleton/" + Version},
 		{"configured", map[string]string{
-			"Accept": "application/vnd.example+json",
+			"Accept":     "application/vnd.example+json",
 			"User-Agent": "Example-Renewer/1.0",
 		}, "application/vnd.example+json", "Example-Renewer/1.0"},
 	}

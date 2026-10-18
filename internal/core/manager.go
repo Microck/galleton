@@ -1,6 +1,7 @@
 package core
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/base64"
@@ -10,11 +11,14 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptrace"
+	"net/url"
 	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/Microck/galleton/cookiefile"
 )
 
 type entry struct {
@@ -30,8 +34,8 @@ type Manager struct {
 	entries   map[string]*entry
 	providers map[string]*Provider
 	vault     *Vault
-	upstream  *http.Client
 	stopping  atomic.Bool
+	pauseMu   sync.Mutex // serializes pause changes and their persistence
 }
 
 func NewManager(v *Vault, c Config) (*Manager, error) {
@@ -43,7 +47,34 @@ func NewManager(v *Vault, c Config) (*Manager, error) {
 	if err != nil {
 		return nil, err
 	}
-	m := &Manager{entries: map[string]*entry{}, providers: providers, vault: v, upstream: newUpstreamClient()}
+	m := &Manager{entries: map[string]*entry{}, providers: providers, vault: v}
+	pauses, err := v.LoadPauses()
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now().UTC()
+	normalized := false
+	for name, until := range pauses {
+		// Pauses of removed providers lapse. A clock moved backwards cannot
+		// stretch a pause past its maximum length.
+		p := providers[name]
+		if p == nil || !until.After(now) {
+			normalized = true
+			continue
+		}
+		if limit := now.Add(maxPause); until.After(limit) {
+			until = limit
+			normalized = true
+		}
+		p.gate.pause(until)
+	}
+	// Save the bounded set, so restarts cannot keep re-clamping a far-future
+	// deadline to a fresh 24 hours.
+	if normalized {
+		if err := m.savePauses(); err != nil {
+			return nil, err
+		}
+	}
 	for _, s := range states {
 		changed := false
 		if s.PendingRefresh || s.PendingRequest {
@@ -170,7 +201,7 @@ func (m *Manager) Import(id string, in Import) (Metadata, error) {
 	if !ok {
 		return Metadata{}, invalid("Unknown provider.")
 	}
-	if len(in.AccessToken) > 64<<10 || len(in.RefreshToken) > 64<<10 || len(in.CookieHeader) > 128<<10 || len(in.Secrets) > 32 {
+	if len(in.AccessToken) > 64<<10 || len(in.RefreshToken) > 64<<10 || len(in.CookieHeader) > 128<<10 || len(in.Secrets) > 32 || len(in.Cookies) > cookiefile.MaxCookies {
 		return Metadata{}, invalid("Credentials exceed size limits.")
 	}
 	if !validHeader("Authorization", in.AccessToken) || !validHeader("Authorization", in.RefreshToken) {
@@ -187,38 +218,60 @@ func (m *Manager) Import(id string, in Import) (Metadata, error) {
 		}
 		s.Secrets[k] = v
 	}
-	if in.CookieHeader != "" || len(in.SetCookies) > 0 {
+	var origin *url.URL
+	if in.CookieOrigin != "" || in.CookieHeader != "" || len(in.SetCookies) > 0 {
 		u, err := p.allowed(in.CookieOrigin)
 		if err != nil {
 			return Metadata{}, err
 		}
-		var cookies []*http.Cookie
-		if in.CookieHeader != "" {
-			parsed, err := http.ParseCookie(in.CookieHeader)
-			if err != nil {
-				return Metadata{}, invalid("Invalid Cookie header.")
-			}
-			for _, c := range parsed {
-				c.Path = "/"
-				c.Secure = u.Scheme == "https"
-			}
-			cookies = append(cookies, parsed...)
+		origin = u
+	}
+	// Order of precedence: Cookie header, then Set-Cookie values, then
+	// structured cookies. Later values replace earlier ones.
+	var header []ImportCookie
+	if in.CookieHeader != "" {
+		parsed, err := http.ParseCookie(in.CookieHeader)
+		if err != nil {
+			return Metadata{}, invalid("Invalid Cookie header.")
 		}
+		// A bare Cookie header has no scope; it is host-only on cookie_origin,
+		// or scoped to the adapter's cookie_domain when the origin is inside it.
+		for _, c := range parsed {
+			header = append(header, ImportCookie{Name: c.Name, Value: c.Value, Path: "/", Secure: origin.Scheme == "https"})
+		}
+	}
+	structured := in.Cookies
+	skipped := 0
+	if len(header) > 0 {
+		var err error
+		if s.Cookies, _, err = importCookies(p, s.Cookies, origin, header, now); err != nil {
+			return Metadata{}, err
+		}
+	}
+	if len(in.SetCookies) > 0 {
 		parsed, err := parseSetCookies(in.SetCookies)
 		if err != nil {
 			return Metadata{}, err
 		}
-		cookies = append(cookies, parsed...)
 		var accepted int
-		s.Cookies, accepted, _, err = updateCookies(nil, u, cookies, now)
+		s.Cookies, accepted, _, err = updateCookiesIn(s.Cookies, origin, parsed, now, p.cookieDomain)
 		if err != nil {
 			return Metadata{}, err
 		}
-		if accepted < len(cookies) {
+		if accepted < len(parsed) {
 			return Metadata{}, invalid("One or more cookies are not valid for cookie_origin.")
 		}
 	}
+	if len(structured) > 0 {
+		var err error
+		if s.Cookies, skipped, err = importCookies(p, s.Cookies, origin, structured, now); err != nil {
+			return Metadata{}, err
+		}
+	}
 	if s.AccessToken == "" && s.RefreshToken == "" && len(s.Cookies) == 0 && len(s.Secrets) == 0 {
+		if skipped > 0 {
+			return Metadata{}, invalid("None of the supplied cookies belong to this provider's origins.")
+		}
 		return Metadata{}, invalid("No usable credentials were supplied.")
 	}
 	if !in.Replace && in.ExpectedRevision == nil {
@@ -385,7 +438,24 @@ func backoff(failures int) time.Duration {
 	jitter := time.Duration(binary.LittleEndian.Uint64(b[:]) % uint64(base/2+1))
 	return base + jitter
 }
-func (m *Manager) ensure(e *entry, force bool) error {
+
+// credentialsUsable reports whether a deferred renewal can still serve the
+// current access token or at least one unexpired cookie.
+func credentialsUsable(s *State, now time.Time) bool {
+	if s.AccessToken != "" && (s.AccessExpiresAt.IsZero() || now.Before(s.AccessExpiresAt)) {
+		return true
+	}
+	for _, cookie := range s.Cookies {
+		if cookie.Cookie.Expires.IsZero() || now.Before(cookie.Cookie.Expires) {
+			return true
+		}
+	}
+	return false
+}
+
+// ensure renews when needed. started is when the calling API operation began
+// (zero for the scheduler); its budget bounds pacing waits and upstream time.
+func (m *Manager) ensure(e *entry, force bool, started time.Time) error {
 	if m.stopping.Load() {
 		return problem(503, "shutting_down", "The daemon is shutting down; no new renewal was started.")
 	}
@@ -399,14 +469,7 @@ func (m *Manager) ensure(e *entry, force bool) error {
 	s := e.state
 	stillValid := s.AccessExpiresAt.IsZero() || now.Before(s.AccessExpiresAt)
 	if s.Status == "retry_wait" && now.Before(s.NextRefresh) {
-		usable := s.AccessToken != "" && stillValid
-		for _, cookie := range s.Cookies {
-			if cookie.Cookie.Expires.IsZero() || now.Before(cookie.Cookie.Expires) {
-				usable = true
-				break
-			}
-		}
-		if !force && usable {
+		if !force && credentialsUsable(s, now) {
 			return nil
 		}
 		p := problem(503, "retry_later", "Renewal is waiting for its retry deadline.")
@@ -420,12 +483,24 @@ func (m *Manager) ensure(e *entry, force bool) error {
 	if p == nil || s.ConfigHash != p.hash {
 		return problem(409, "configuration_error", "Provider configuration does not match the imported session.")
 	}
+	if started.IsZero() {
+		started = time.Now()
+	}
+	b := p.newBudget(started)
+	// A client-set pause or the provider's minimum interval defers renewal
+	// before anything is journaled or sent. Current credentials stay in use.
+	if wait := p.reserve(b); wait != nil {
+		if !force && credentialsUsable(s, now) {
+			return nil
+		}
+		return wait
+	}
 	// Build before journaling so missing credentials or bad templates don't create
 	// an ambiguous network outcome. Client disconnects cannot interrupt persistence.
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(p.TimeoutSeconds)*time.Second)
-	defer cancel()
-	req, err := makeRefreshRequest(ctx, s, p)
+	// performRefresh starts the upstream timeout once the call is admitted.
+	req, err := makeRefreshRequest(context.Background(), s, p)
 	if err != nil {
+		p.release()
 		n := cloneState(s)
 		n.Status = "configuration_error"
 		n.LastError = problem(409, "configuration_error", "Missing refresh credentials or invalid adapter template.")
@@ -439,11 +514,24 @@ func (m *Manager) ensure(e *entry, force bool) error {
 	pending.PendingRefresh = true
 	pending.Status = "refreshing"
 	if err = m.vault.Save(pending); err != nil {
+		p.release()
 		return storageProblem()
 	} // No request was sent.
 	e.state = pending
 	e.publish()
-	result := performRefresh(pending, p, m.upstream, req)
+	if wait := p.dispatch(b); wait != nil {
+		// Paused or crowded after the checkpoint: nothing was sent, so the
+		// session returns to its previous state instead of gaining a retry
+		// deadline that would outlive an early resume.
+		if err := m.commit(e, cloneState(s)); err != nil {
+			return err
+		}
+		if !force && credentialsUsable(s, now) {
+			return nil
+		}
+		return wait
+	}
+	result := performRefresh(pending, p, p.renewal, req, b)
 	pending.PendingRefresh = false
 	pending.Revision++
 	e.completed = time.Now().UTC()
@@ -461,7 +549,7 @@ func (m *Manager) ensure(e *entry, force bool) error {
 		pending.LastError = result
 		pending.Failures++
 		switch result.Code {
-		case "retry_later":
+		case "retry_later", "upstream_blocked":
 			pending.Status = "retry_wait"
 			pending.NextRefresh = e.completed.Add(backoff(pending.Failures))
 			if result.RetryAt.After(pending.NextRefresh) {
@@ -497,7 +585,7 @@ func (m *Manager) Refresh(id string) (Metadata, error) {
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if err = m.ensure(e, !e.completed.After(started)); err != nil {
+	if err = m.ensure(e, !e.completed.After(started), started); err != nil {
 		return Metadata{}, err
 	}
 	return metadataOf(e), nil
@@ -509,6 +597,7 @@ type HeadersResult struct {
 	ExpiresAt time.Time         `json:"expires_at,omitempty"`
 }
 
+// headersFor builds the authentication headers for an allowlisted URL.
 func headersFor(s *State, uRaw string) (HeadersResult, error) {
 	u, _, err := canonicalURL(uRaw)
 	if err != nil {
@@ -516,18 +605,16 @@ func headersFor(s *State, uRaw string) (HeadersResult, error) {
 	}
 	headers := map[string]string{}
 	now := time.Now()
+	var expires time.Time
 	if s.AccessToken != "" && (s.AccessExpiresAt.IsZero() || now.Before(s.AccessExpiresAt)) {
 		headers["Authorization"] = "Bearer " + s.AccessToken
+		expires = s.AccessExpiresAt
 	}
 	if c := cookieHeaders(s.Cookies, u, now); c != "" {
 		headers["Cookie"] = c
 	}
 	if len(headers) == 0 {
 		return HeadersResult{}, problem(409, "no_credentials_for_origin", "This session has no usable headers for the requested origin.")
-	}
-	var expires time.Time
-	if _, ok := headers["Authorization"]; ok {
-		expires = s.AccessExpiresAt
 	}
 	return HeadersResult{headers, s.Revision, expires}, nil
 }
@@ -546,6 +633,7 @@ func (m *Manager) Headers(id, rawURL string) (HeadersResult, error) {
 	if err != nil {
 		return HeadersResult{}, err
 	}
+	started := time.Now() // the call's budget includes waiting for the session
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	p := m.providers[e.state.Provider]
@@ -555,7 +643,7 @@ func (m *Manager) Headers(id, rawURL string) (HeadersResult, error) {
 	if _, err = p.allowed(rawURL); err != nil {
 		return HeadersResult{}, err
 	} // Check scope before any renewal.
-	if err = m.ensure(e, false); err != nil {
+	if err = m.ensure(e, false, started); err != nil {
 		return HeadersResult{}, err
 	}
 	result, err := headersFor(e.state, rawURL)
@@ -583,10 +671,11 @@ func (m *Manager) Capture(id, rawURL string, lines []string) (Metadata, error) {
 		return Metadata{}, err
 	}
 	cookies, rejected := parseSetCookiesPartial(lines)
+	cookies = withoutProtected(cookies, p.protected)
 	n := cloneState(e.state)
 	accepted := 0
 	if len(cookies) > 0 {
-		n.Cookies, accepted, _, err = updateCookies(n.Cookies, u, cookies, time.Now().UTC())
+		n.Cookies, accepted, _, err = updateCookiesIn(n.Cookies, u, cookies, time.Now().UTC(), p.cookieDomain)
 	}
 	if err != nil {
 		return Metadata{}, m.cookieCaptureFailure(e)
@@ -625,6 +714,9 @@ func (m *Manager) Request(id string, in RequestInput) (RequestResult, error) {
 	if err != nil {
 		return RequestResult{}, err
 	}
+	// The call's budget starts now, before waiting for the session, so a
+	// request queued behind another one cannot outlive the client's deadline.
+	started := time.Now()
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	p := m.providers[e.state.Provider]
@@ -644,9 +736,15 @@ func (m *Manager) Request(id string, in RequestInput) (RequestResult, error) {
 	default:
 		return RequestResult{}, invalid("Unsupported request method.")
 	}
+	if len(in.BodyBase64) > base64.StdEncoding.EncodedLen(int(p.maxRequest)) {
+		return RequestResult{}, problem(413, "body_too_large", "Request body exceeds this adapter's managed request limit.")
+	}
 	body, err := base64.StdEncoding.DecodeString(in.BodyBase64)
-	if err != nil || len(body) > 1<<20 {
-		return RequestResult{}, invalid("Invalid base64 request body, or body exceeds 1 MiB.")
+	if err != nil {
+		return RequestResult{}, invalid("Invalid base64 request body.")
+	}
+	if int64(len(body)) > p.maxRequest {
+		return RequestResult{}, problem(413, "body_too_large", "Request body exceeds this adapter's managed request limit.")
 	}
 	headers := http.Header{}
 	if len(in.Headers) > 64 {
@@ -658,7 +756,13 @@ func (m *Manager) Request(id string, in RequestInput) (RequestResult, error) {
 		}
 		headers.Set(k, v)
 	}
-	if err = m.ensure(e, false); err != nil {
+	if until, paused := p.gate.paused(time.Now().UTC()); paused {
+		return RequestResult{}, pausedProblem(until)
+	}
+	// One budget covers a renewal and the request together, so the API call
+	// cannot outlive the server's response deadline.
+	b := p.newBudget(started)
+	if err = m.ensure(e, false, started); err != nil {
 		return RequestResult{}, err
 	}
 	auth, err := headersFor(e.state, u.String())
@@ -668,28 +772,49 @@ func (m *Manager) Request(id string, in RequestInput) (RequestResult, error) {
 	for k, v := range auth.Headers {
 		headers.Set(k, v)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(p.TimeoutSeconds)*time.Second)
-	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, method, u.String(), strings.NewReader(string(body)))
+	// The upstream timeout starts once the call is admitted, after pacing.
+	req, err := http.NewRequestWithContext(context.Background(), method, u.String(), bytes.NewReader(body))
 	if err != nil {
 		return RequestResult{}, invalid("Invalid upstream request.")
 	}
-	req.GetBody = nil
+	if !p.KeepAlive {
+		req.GetBody = nil
+	}
+	// With keep_alive, GetBody lets the transport resend a request only when
+	// nothing was written to a stale pooled connection. Requests that were
+	// written are never resent, except that Go may resend idempotent methods
+	// (GET, HEAD, OPTIONS, or Idempotency-Key) after the server closed a
+	// reused connection without responding.
 	req.Header = headers
 	var connected atomic.Bool
 	req = req.WithContext(httptrace.WithClientTrace(req.Context(), &httptrace.ClientTrace{
 		GotConn: func(httptrace.GotConnInfo) { connected.Store(true) },
 	}))
+	if wait := p.reserve(b); wait != nil {
+		return RequestResult{}, wait
+	}
 	// Persist before any credential can reach the upstream. A restart must
 	// treat an unfinished request as ambiguous, just like an unfinished renewal.
 	pending := cloneState(e.state)
 	pending.PendingRequest = true
 	if err := m.vault.Save(pending); err != nil {
+		p.release()
 		return RequestResult{}, storageProblem()
 	}
 	e.state = pending
 	e.publish()
-	resp, err := m.upstream.Do(req)
+	if wait := p.dispatch(b); wait != nil {
+		// Paused or crowded after the checkpoint: nothing was sent.
+		n := cloneState(e.state)
+		n.PendingRequest = false
+		if err := m.commit(e, n); err != nil {
+			return RequestResult{}, err
+		}
+		return RequestResult{}, wait
+	}
+	req, cancel := p.withDeadline(req, b)
+	defer cancel()
+	resp, err := p.resource.Do(req)
 	if err != nil {
 		if connected.Load() {
 			return RequestResult{}, m.resourceRequestFailure(e)
@@ -708,9 +833,12 @@ func (m *Manager) Request(id string, in RequestInput) (RequestResult, error) {
 	n.PendingRequest = false
 	if lines := resp.Header.Values("Set-Cookie"); len(lines) > 0 {
 		cookies, rejected := parseSetCookiesPartial(lines)
+		// Only renewal may replace protected credential cookies, so a guest
+		// page cannot overwrite the imported session's tokens.
+		cookies = withoutProtected(cookies, p.protected)
 		accepted := 0
 		if len(cookies) > 0 {
-			n.Cookies, accepted, _, err = updateCookies(n.Cookies, u, cookies, time.Now().UTC())
+			n.Cookies, accepted, _, err = updateCookiesIn(n.Cookies, u, cookies, time.Now().UTC(), p.cookieDomain)
 		}
 		if err != nil {
 			return RequestResult{}, m.cookieCaptureFailure(e)
@@ -729,12 +857,12 @@ func (m *Manager) Request(id string, in RequestInput) (RequestResult, error) {
 	if err = m.commit(e, n); err != nil {
 		return RequestResult{}, problem(503, "storage_failure", "The upstream request was sent and a response was received, but credential persistence failed; do not retry the request automatically.")
 	}
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, (4<<20)+1))
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, p.maxResponse+1))
 	if err != nil {
 		return RequestResult{}, problem(502, "upstream_request_failed", "Could not read the complete upstream response; request was not retried.")
 	}
-	if len(raw) > 4<<20 {
-		return RequestResult{}, problem(502, "response_too_large", "Upstream response exceeds the 4 MiB buffered response limit.")
+	if int64(len(raw)) > p.maxResponse {
+		return RequestResult{}, problem(502, "response_too_large", "Upstream response exceeds this adapter's buffered response limit.")
 	}
 	outHeaders := http.Header{}
 	for k, v := range resp.Header {
@@ -764,7 +892,7 @@ func (m *Manager) RunScheduler(ctx context.Context) {
 			if !e.mu.TryLock() {
 				continue
 			}
-			due := !e.deleted && (e.dirty || ((e.state.Status == "ready" || e.state.Status == "retry_wait") && !time.Now().Before(e.state.NextRefresh)))
+			due := !e.deleted && (e.dirty || ((e.state.Status == "ready" || e.state.Status == "retry_wait") && !time.Now().Before(e.state.NextRefresh) && !m.paused(e.state.Provider)))
 			if !due {
 				e.mu.Unlock()
 				continue
@@ -772,7 +900,11 @@ func (m *Manager) RunScheduler(ctx context.Context) {
 			select {
 			case sem <- struct{}{}:
 				wg.Add(1)
-				go func(e *entry) { defer wg.Done(); defer func() { <-sem; e.mu.Unlock() }(); _ = m.ensure(e, false) }(e)
+				go func(e *entry) {
+					defer wg.Done()
+					defer func() { <-sem; e.mu.Unlock() }()
+					_ = m.ensure(e, false, time.Time{})
+				}(e)
 			default:
 				e.mu.Unlock()
 			}
@@ -787,6 +919,122 @@ func (m *Manager) RunScheduler(ctx context.Context) {
 			scan()
 		}
 	}
+}
+
+func (m *Manager) paused(provider string) bool {
+	p := m.providers[provider]
+	if p == nil {
+		return false
+	}
+	_, paused := p.gate.paused(time.Now().UTC())
+	return paused
+}
+
+// ProviderInfo is the non-secret view of a provider. It never includes the
+// proxy URL, which may carry credentials.
+type ProviderInfo struct {
+	Name        string    `json:"name"`
+	Kind        string    `json:"kind"`
+	Origins     []string  `json:"origins"`
+	Proxied     bool      `json:"proxied"`
+	PausedUntil time.Time `json:"paused_until,omitempty"`
+}
+
+// ProviderPause reports a provider's pause after it was set or cleared.
+type ProviderPause struct {
+	Provider    string    `json:"provider"`
+	PausedUntil time.Time `json:"paused_until,omitempty"`
+}
+
+func (m *Manager) Providers() []ProviderInfo {
+	now := time.Now().UTC()
+	out := make([]ProviderInfo, 0, len(m.providers))
+	for _, p := range m.providers {
+		info := ProviderInfo{Name: p.Name, Kind: p.Kind, Origins: p.Origins, Proxied: p.Proxy != "" || p.ProxyEnv != ""}
+		if until, paused := p.gate.paused(now); paused {
+			info.PausedUntil = until
+		}
+		out = append(out, info)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
+}
+
+// Pause stops managed requests and renewals for a provider until the given
+// number of seconds have passed. It only extends an existing pause. The pause
+// is saved in the vault, so a daemon restart keeps it.
+func (m *Manager) Pause(provider string, seconds int) (ProviderPause, error) {
+	if err := checkID(provider); err != nil {
+		return ProviderPause{}, err
+	}
+	p := m.providers[provider]
+	if p == nil {
+		return ProviderPause{}, problem(404, "not_found", "Provider not found.")
+	}
+	// Compare before converting: a huge count would overflow time.Duration.
+	if seconds < 1 || seconds > int(maxPause/time.Second) {
+		return ProviderPause{}, invalid("seconds must be 1–86400.")
+	}
+	m.pauseMu.Lock()
+	defer m.pauseMu.Unlock()
+	// The pause holds in memory even when saving it fails: refusing calls is
+	// the safe side. The error tells the client it would not survive a restart.
+	until := p.gate.pause(time.Now().UTC().Add(time.Duration(seconds) * time.Second))
+	if err := m.savePauses(); err != nil {
+		return ProviderPause{}, problem(503, "storage_failure", "The pause is in effect but could not be saved; a daemon restart would lift it.")
+	}
+	return ProviderPause{Provider: p.Name, PausedUntil: until}, nil
+}
+
+// Resume clears a provider's pause. When the cleared state cannot be saved the
+// pause stays, so memory and disk never disagree in the unsafe direction.
+func (m *Manager) Resume(provider string) (ProviderPause, error) {
+	if err := checkID(provider); err != nil {
+		return ProviderPause{}, err
+	}
+	p := m.providers[provider]
+	if p == nil {
+		return ProviderPause{}, problem(404, "not_found", "Provider not found.")
+	}
+	m.pauseMu.Lock()
+	defer m.pauseMu.Unlock()
+	previous, paused := p.gate.paused(time.Now().UTC())
+	p.gate.resume()
+	if err := m.savePauses(); err != nil {
+		if paused {
+			// The file may already be gone even though the save failed, so
+			// write the restored pause back. If that fails too, the pause
+			// still holds until the daemon restarts.
+			p.gate.pause(previous)
+			_ = m.savePauses()
+		}
+		return ProviderPause{}, problem(503, "storage_failure", "The pause could not be cleared on disk, so it stays in effect.")
+	}
+	return ProviderPause{Provider: p.Name}, nil
+}
+
+// savePauses writes every active provider pause. Callers hold pauseMu.
+func (m *Manager) savePauses() error {
+	now := time.Now().UTC()
+	pauses := map[string]time.Time{}
+	for name, p := range m.providers {
+		if until, paused := p.gate.paused(now); paused {
+			pauses[name] = until
+		}
+	}
+	return m.vault.SavePauses(pauses)
+}
+
+// requestEnvelopeLimit bounds the JSON body of the managed request endpoint:
+// the largest adapter body limit in base64, plus room for URL and headers.
+func (m *Manager) requestEnvelopeLimit() int64 {
+	limit := int64(2 << 20)
+	for _, p := range m.providers {
+		if n := int64(base64.StdEncoding.EncodedLen(int(p.maxRequest))) + 1<<20; n > limit {
+			limit = n
+		}
+	}
+	return limit
 }
 func AsProblem(err error) *Problem {
 	var p *Problem

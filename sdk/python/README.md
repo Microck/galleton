@@ -9,4 +9,6 @@ response = sessions.request("account", configured_upstream_url)
 print(response.status, response.json())
 ```
 
+`connect` accepts structured `cookies` (`name`, `value`, `domain`, `host_only`, `path`, `expires`, `secure`, `http_only`, `same_site`). `providers()`, `pause(provider, seconds)` and `resume(provider)` list providers and pause or resume their managed requests and renewals; a pause survives a daemon restart. Errors may carry the daemon codes `upstream_blocked` or `provider_paused` with `retry_at` set.
+
 Install this directory with pip or add it to PYTHONPATH. The package has no runtime third-party dependencies. It is not published to PyPI. See the root README and SECURITY.md for provider configuration, the managed-request contract, and limitations.

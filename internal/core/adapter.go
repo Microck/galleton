@@ -3,11 +3,9 @@ package core
 import (
 	"bytes"
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"io"
-	"net"
 	"net/http"
 	"net/http/httptrace"
 	"net/url"
@@ -16,15 +14,6 @@ import (
 	"sync/atomic"
 	"time"
 )
-
-func newUpstreamClient() *http.Client {
-	// No environment proxy, redirects, or reused connections. In particular, do
-	// not let the transport invisibly replay a refresh on a reused connection.
-	return &http.Client{
-		Transport:     &http.Transport{Proxy: nil, DialContext: (&net.Dialer{Timeout: 10 * time.Second}).DialContext, TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12}, TLSHandshakeTimeout: 10 * time.Second, MaxResponseHeaderBytes: 64 << 10, DisableKeepAlives: true},
-		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
-	}
-}
 
 func substitute(input string, s *State, p *Provider, u *url.URL) (string, error) {
 	var out strings.Builder
@@ -263,13 +252,17 @@ func parseRetryAfter(value string, now time.Time) time.Time {
 
 // performRefresh mutates a working copy. Even partial replacement credentials
 // are retained before a protocol error, rather than reverting to an old token.
-func performRefresh(s *State, p *Provider, client *http.Client, req *http.Request) *Problem {
+func performRefresh(s *State, p *Provider, client *http.Client, req *http.Request, b *budget) *Problem {
 	// With the built-in Go transport, no credential-bearing request can have
 	// been sent before GotConn. DNS/dial/TLS-establishment failures are safe
 	// to retry, unlike a lost response after obtaining a connection.
 	var connected atomic.Bool
 	trace := &httptrace.ClientTrace{GotConn: func(httptrace.GotConnInfo) { connected.Store(true) }}
 	req = req.WithContext(httptrace.WithClientTrace(req.Context(), trace))
+	// ensure admitted this call through the provider's gate; the upstream
+	// timeout starts now.
+	req, cancel := p.withDeadline(req, b)
+	defer cancel()
 	resp, err := client.Do(req)
 	if err != nil {
 		if !connected.Load() {
@@ -279,16 +272,22 @@ func performRefresh(s *State, p *Provider, client *http.Client, req *http.Reques
 	}
 	defer resp.Body.Close()
 	now := time.Now().UTC()
+	success2xx := resp.StatusCode >= 200 && resp.StatusCode < 300
 	retained := 0
 	var cookieProblem *Problem
+	held := protectedHeld(s.Cookies, p.protected, now)
 	if lines := resp.Header.Values("Set-Cookie"); len(lines) > 0 {
 		cookies, rejected := parseSetCookiesPartial(lines)
 		if rejected {
 			cookieProblem = problem(502, "protocol_error", "The provider returned an invalid or unsupported cookie rotation.")
 		}
+		if !success2xx {
+			// Only a successful renewal may replace protected credential cookies.
+			cookies = withoutProtected(cookies, p.protected)
+		}
 		if len(cookies) > 0 {
 			var updated []StoredCookie
-			updated, accepted, nextRetained, cookieErr := updateCookies(s.Cookies, req.URL, cookies, now)
+			updated, accepted, nextRetained, cookieErr := updateCookiesIn(s.Cookies, req.URL, cookies, now, p.cookieDomain)
 			if cookieErr != nil {
 				cookieProblem = problem(502, "protocol_error", "The provider returned more cookies than the session limit.")
 			} else {
@@ -305,6 +304,16 @@ func performRefresh(s *State, p *Provider, client *http.Client, req *http.Reques
 		return transientOrUncertain(p)
 	}
 	doc, jsonErr := parseJSON(raw)
+	if !success2xx {
+		code, _ := tokenAt(doc, "/error")
+		if !(p.Kind == "oauth2" && code == "invalid_grant") && p.blocked(resp, raw, jsonErr == nil) {
+			// A challenge page from a bot-protection layer: the request did not
+			// reach the session logic, so the credential is still unspent.
+			e := problem(503, "upstream_blocked", "The provider's bot protection refused renewal; credentials were kept and renewal will retry after backoff.")
+			e.RetryAt = parseRetryAfter(resp.Header.Get("Retry-After"), now)
+			return e
+		}
+	}
 	if resp.StatusCode == 429 {
 		e := problem(503, "retry_later", "The provider rate-limited renewal.")
 		e.RetryAt = parseRetryAfter(resp.Header.Get("Retry-After"), now)
@@ -394,8 +403,50 @@ func performRefresh(s *State, p *Provider, client *http.Client, req *http.Reques
 	if mapping.RequireSetCookie && retained == 0 {
 		return problem(502, "protocol_error", "The adapter requires a valid Set-Cookie renewal response.")
 	}
+	if mapping.RequireSetCookie && !protectedSuperseded(held, s.Cookies, now) {
+		// An unrelated cookie, or the same name on another path, is not
+		// renewal evidence: the next renewal would still send a refresh
+		// cookie the provider may already have consumed.
+		return problem(502, "protocol_error", "The renewal response did not replace every protected credential cookie.")
+	}
 	if !hasToken && retained == 0 && !success {
 		return problem(502, "protocol_error", "No renewal evidence: configure a token field, a success field, or require replacement cookies.")
 	}
 	return nil
+}
+
+// protectedHeld returns the live protected cookies, which the next renewal
+// would send again.
+func protectedHeld(cookies []StoredCookie, protected map[string]bool, now time.Time) []StoredCookie {
+	var held []StoredCookie
+	for _, c := range cookies {
+		if protected[c.Cookie.Name] && (c.Cookie.Expires.IsZero() || c.Cookie.Expires.After(now)) {
+			held = append(held, c)
+		}
+	}
+	return held
+}
+
+// protectedSuperseded reports whether every held cookie was replaced by a new
+// live cookie with the same name and path that is sent where it was sent. A
+// held cookie still stored unchanged was not replaced, and one that is gone
+// without such a successor was deleted.
+func protectedSuperseded(held, current []StoredCookie, now time.Time) bool {
+	for _, h := range held {
+		successor := false
+		for _, c := range current {
+			if c.Origin == h.Origin && c.Domain == h.Domain && c.Cookie.Name == h.Cookie.Name && c.Cookie.Path == h.Cookie.Path && c.Cookie.Value == h.Cookie.Value && c.Cookie.Expires.Equal(h.Cookie.Expires) {
+				return false
+			}
+			live := c.Cookie.Value != "" && (c.Cookie.Expires.IsZero() || c.Cookie.Expires.After(now))
+			sameTarget := c.Domain == "" && c.Origin == h.Origin || c.Domain != "" && domainMatch(originHost(h.Origin), c.Domain)
+			if live && sameTarget && c.Cookie.Name == h.Cookie.Name && c.Cookie.Path == h.Cookie.Path {
+				successor = true
+			}
+		}
+		if !successor {
+			return false
+		}
+	}
+	return true
 }

@@ -182,12 +182,105 @@ func compileProviders(c Config) (map[string]*Provider, error) {
 				}
 			}
 		}
-		raw, _ := json.Marshal(p)
+		if err := compileScope(&p); err != nil {
+			return nil, fmt.Errorf("provider %s: %w", p.Name, err)
+		}
+		if err := compileEgress(&p); err != nil {
+			return nil, fmt.Errorf("provider %s: %w", p.Name, err)
+		}
+		// Egress, pacing, size limits and block signatures do not change what a
+		// stored credential means or where it may be sent; changing them does
+		// not invalidate sessions. Every other field does.
+		hashable := p
+		hashable.Proxy, hashable.ProxyEnv, hashable.KeepAlive, hashable.MinIntervalMS = "", "", false, 0
+		hashable.MaxRequestBodyBytes, hashable.MaxResponseBodyBytes, hashable.BlockSignatures = 0, 0, nil
+		raw, _ := json.Marshal(hashable)
 		sum := sha256.Sum256(raw)
 		p.hash = hex.EncodeToString(sum[:])
 		out[p.Name] = &p
 	}
 	return out, nil
+}
+
+func validCookieName(name string) bool {
+	return name != "" && len(name) <= 256 && (&http.Cookie{Name: name, Value: "x"}).Valid() == nil
+}
+
+// compileScope validates where credentials may be stored and sent.
+func compileScope(p *Provider) error {
+	if p.CookieDomain != "" {
+		domain := strings.ToLower(strings.TrimPrefix(p.CookieDomain, "."))
+		if domain == "" || strings.HasSuffix(domain, ".") || !strings.Contains(domain, ".") || net.ParseIP(domain) != nil || strings.Trim(domain, "abcdefghijklmnopqrstuvwxyz0123456789.-") != "" || strings.Contains(domain, "..") {
+			return errors.New("cookie_domain must be an ASCII DNS name with at least two labels, such as .www.example.com")
+		}
+		matched := false
+		for _, o := range p.Origins {
+			matched = matched || domainMatch(originHost(o), domain)
+		}
+		if !matched {
+			return errors.New("cookie_domain must contain at least one listed origin")
+		}
+		p.cookieDomain = domain
+	}
+	if len(p.ProtectedCookies) > 32 {
+		return errors.New("at most 32 protected_cookies")
+	}
+	p.protected = map[string]bool{}
+	for _, name := range p.ProtectedCookies {
+		if !validCookieName(name) || p.protected[name] {
+			return errors.New("protected_cookies must be distinct valid cookie names")
+		}
+		p.protected[name] = true
+	}
+	return nil
+}
+
+// compileEgress builds the provider's upstream clients. A configured proxy
+// that cannot be read stops startup: there is no direct-connection fallback.
+func compileEgress(p *Provider) error {
+	var proxy *url.URL
+	var err error
+	switch {
+	case p.Proxy != "" && p.ProxyEnv != "":
+		return errors.New("use proxy or proxy_env, not both")
+	case p.Proxy != "":
+		proxy, err = parseProxy(p.Proxy, false)
+	case p.ProxyEnv != "":
+		value := os.Getenv(p.ProxyEnv)
+		if value == "" {
+			return errors.New("proxy environment variable is missing; refusing to fall back to a direct connection")
+		}
+		proxy, err = parseProxy(value, true)
+	}
+	if err != nil {
+		return err
+	}
+	if p.MinIntervalMS < 0 || p.MinIntervalMS > 3600000 {
+		return errors.New("min_interval_ms must be 0–3600000")
+	}
+	p.maxRequest, p.maxResponse = defaultMaxRequestBody, defaultMaxResponseBody
+	if p.MaxRequestBodyBytes != 0 {
+		if p.MaxRequestBodyBytes < 1 || p.MaxRequestBodyBytes > maxManagedBody {
+			return errors.New("max_request_body_bytes must be 1–67108864")
+		}
+		p.maxRequest = p.MaxRequestBodyBytes
+	}
+	if p.MaxResponseBodyBytes != 0 {
+		if p.MaxResponseBodyBytes < 1 || p.MaxResponseBodyBytes > maxManagedBody {
+			return errors.New("max_response_body_bytes must be 1–67108864")
+		}
+		p.maxResponse = p.MaxResponseBodyBytes
+	}
+	if err := validateBlockSignatures(p.BlockSignatures); err != nil {
+		return err
+	}
+	p.renewal = newUpstreamClient(proxy, false)
+	p.resource = p.renewal
+	if p.KeepAlive {
+		p.resource = newUpstreamClient(proxy, true)
+	}
+	p.gate = &gate{}
+	return nil
 }
 func validHeader(name, value string) bool {
 	if name == "" || strings.ContainsAny(value, "\r\n\x00") {

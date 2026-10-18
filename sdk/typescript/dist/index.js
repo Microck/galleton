@@ -35,11 +35,12 @@ function encode64(bytes) {
 function decode64(value) {
     return Uint8Array.from(atob(value), char => char.charCodeAt(0));
 }
-function sessionPath(id) {
-    if (!/^[A-Za-z0-9_-]{1,64}$/.test(id))
-        throw new TypeError("Invalid session ID");
-    return `/v1/sessions/${id}`;
+function checkName(value, label) {
+    if (!/^[A-Za-z0-9_-]{1,64}$/.test(value))
+        throw new TypeError(`Invalid ${label}`);
+    return value;
 }
+function sessionPath(id) { return `/v1/sessions/${checkName(id, "session ID")}`; }
 async function responseText(response) {
     const reader = response.body?.getReader();
     if (!reader)
@@ -53,7 +54,7 @@ async function responseText(response) {
             if (done)
                 break;
             size += value.byteLength;
-            if (size > 8 * 1024 * 1024) {
+            if (size > 128 * 1024 * 1024) {
                 await reader.cancel().catch(() => { });
                 throw new GalletonError("invalid_response", "Oversized daemon response.", response.status);
             }
@@ -138,6 +139,19 @@ export class Galleton {
         return this.call("POST", sessionPath(id) + "/cookies", { url, set_cookie: setCookie });
     }
     async forget(id) { await this.call("DELETE", sessionPath(id)); }
+    async providers() {
+        return (await this.call("GET", "/v1/providers")).providers;
+    }
+    /** Pauses managed requests and renewals for a provider; only extends an existing pause. */
+    pause(provider, seconds) {
+        const path = `/v1/providers/${checkName(provider, "provider name")}/pause`;
+        if (!Number.isInteger(seconds) || seconds < 1 || seconds > 86400)
+            throw new TypeError("Invalid pause seconds");
+        return this.call("POST", path, { seconds });
+    }
+    resume(provider) {
+        return this.call("DELETE", `/v1/providers/${checkName(provider, "provider name")}/pause`);
+    }
     /** Buffered request with automatic Cookie/Authorization injection and Set-Cookie capture.
      *  Resource calls are never automatically retried. Non-2xx upstream statuses are returned. */
     async request(id, url, options = {}) {
@@ -154,8 +168,8 @@ export class Galleton {
             headers["Content-Type"] = "application/json";
         }
         const bytes = typeof body === "string" ? new TextEncoder().encode(body) : body ?? new Uint8Array();
-        if (bytes.length > 1024 * 1024)
-            throw new TypeError("Request body exceeds 1 MiB");
+        if (bytes.length > 64 * 1024 * 1024)
+            throw new TypeError("Request body exceeds 64 MiB");
         const wire = await this.call("POST", sessionPath(id) + "/request", {
             url, method: options.method ?? "GET", headers, body_base64: encode64(bytes),
         });

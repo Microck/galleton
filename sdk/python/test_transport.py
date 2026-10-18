@@ -1,3 +1,4 @@
+import json
 import threading
 import unittest
 from http.client import IncompleteRead
@@ -149,6 +150,58 @@ class TransportTests(unittest.TestCase):
             server.shutdown()
             server.server_close()
             worker.join(timeout=2)
+
+    def test_provider_routes_from_loopback_server(self):
+        seen = []
+
+        class Handler(BaseHTTPRequestHandler):
+            def reply(self):
+                length = int(self.headers.get("Content-Length") or 0)
+                body = self.rfile.read(length) if length else None
+                seen.append((self.command, self.path, json.loads(body) if body else None))
+                if self.path == "/v1/providers":
+                    out = {"providers": [{"name": "x", "kind": "k", "origins": [], "proxied": False}]}
+                else:
+                    out = {"provider": "x", "paused_until": "2026-01-01T00:00:00Z"}
+                data = json.dumps(out).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            do_GET = do_POST = do_DELETE = reply
+
+            def log_message(self, *_args):
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        worker = threading.Thread(target=server.serve_forever, daemon=True)
+        worker.start()
+        try:
+            client = Galleton("local", f"http://127.0.0.1:{server.server_port}", timeout=2)
+            self.assertEqual(client.providers()[0]["name"], "x")
+            self.assertEqual(client.pause("x", 60)["provider"], "x")
+            client.resume("x")
+        finally:
+            server.shutdown()
+            server.server_close()
+            worker.join(timeout=2)
+        self.assertEqual(seen, [
+            ("GET", "/v1/providers", None),
+            ("POST", "/v1/providers/x/pause", {"seconds": 60}),
+            ("DELETE", "/v1/providers/x/pause", None),
+        ])
+
+    def test_invalid_provider_input_makes_no_request(self):
+        client = Galleton("local")
+        client._opener = MagicMock()
+        for call in [lambda: client.pause("../x", 60), lambda: client.resume("a/b"),
+                     lambda: client.pause("x", 0), lambda: client.pause("x", 86401),
+                     lambda: client.pause("x", 1.5), lambda: client.pause("x", True)]:
+            with self.assertRaises(ValueError):
+                call()
+        client._opener.open.assert_not_called()
 
 
 if __name__ == "__main__":

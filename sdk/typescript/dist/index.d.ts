@@ -1,9 +1,21 @@
 /** Server-side client for an authenticated, loopback-only Galleton daemon. */
+export interface ImportCookie {
+    name: string;
+    value: string;
+    domain?: string;
+    host_only?: boolean;
+    path?: string;
+    expires?: string;
+    secure?: boolean;
+    http_only?: boolean;
+    same_site?: string;
+}
 export interface Credentials {
     provider: string;
     cookie_origin?: string;
     cookie_header?: string;
     set_cookies?: string[];
+    cookies?: ImportCookie[];
     access_token?: string;
     refresh_token?: string;
     access_expires_at?: string;
@@ -27,6 +39,13 @@ export interface SessionStatus {
     access_expires_at?: string;
     cookie_count: number;
     error?: Problem;
+}
+export interface ProviderInfo {
+    name: string;
+    kind: string;
+    origins: string[];
+    proxied: boolean;
+    paused_until?: string;
 }
 export declare class GalletonError extends Error {
     readonly code: string;
@@ -67,6 +86,15 @@ export declare class Galleton {
     headers(id: string, url: string): Promise<Record<string, string>>;
     capture(id: string, url: string, setCookie: string[]): Promise<SessionStatus>;
     forget(id: string): Promise<void>;
+    providers(): Promise<ProviderInfo[]>;
+    /** Pauses managed requests and renewals for a provider; only extends an existing pause. */
+    pause(provider: string, seconds: number): Promise<{
+        provider: string;
+        paused_until: string;
+    }>;
+    resume(provider: string): Promise<{
+        provider: string;
+    }>;
     /** Buffered request with automatic Cookie/Authorization injection and Set-Cookie capture.
      *  Resource calls are never automatically retried. Non-2xx upstream statuses are returned. */
     request(id: string, url: string, options?: RequestOptions): Promise<ManagedResponse>;

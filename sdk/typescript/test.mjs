@@ -61,7 +61,7 @@ test("response limit cancels an HTTP stream before it finishes", {timeout: 15000
     const chunk = Buffer.alloc(1024 * 1024);
     function sendChunk() {
       if (response.destroyed) return;
-      if (chunks === 64) { response.end(); return; }
+      if (chunks === 160) { response.end(); return; }
       chunks++;
       response.write(chunk, () => setImmediate(sendChunk));
     }
@@ -74,7 +74,7 @@ test("response limit cancels an HTTP stream before it finishes", {timeout: 15000
       return true;
     });
     await closed;
-    assert.ok(chunks < 64, "the client must cancel before the whole response is sent");
+    assert.ok(chunks < 160, "the client must cancel before the whole response is sent");
   });
 });
 
@@ -101,4 +101,31 @@ test("JSON requests replace case-variant content-type headers", async () => {
     json: {ok: true},
   }));
   assert.deepEqual(sent.headers, {"X-Test": "ok", "Content-Type": "application/json"});
+});
+
+test("provider pause, resume and list use the documented routes", async () => {
+  const seen = [];
+  await withDaemon(async (request, response) => {
+    const body = request.method === "POST" ? await json(request) : undefined;
+    seen.push([request.method, request.url, body]);
+    response.writeHead(200, {"Content-Type": "application/json"});
+    if (request.url === "/v1/providers") response.end(JSON.stringify({providers: [{name: "x", kind: "k", origins: [], proxied: false}]}));
+    else response.end(JSON.stringify({provider: "x", paused_until: "2026-01-01T00:00:00Z"}));
+  }, async client => {
+    assert.equal((await client.providers())[0].name, "x");
+    assert.equal((await client.pause("x", 60)).provider, "x");
+    await client.resume("x");
+  });
+  assert.deepEqual(seen, [
+    ["GET", "/v1/providers", undefined],
+    ["POST", "/v1/providers/x/pause", {seconds: 60}],
+    ["DELETE", "/v1/providers/x/pause", undefined],
+  ]);
+});
+
+test("invalid provider names and seconds throw without a network request", () => {
+  const c = new Galleton({token: "local", baseURL: "http://127.0.0.1:1"});
+  assert.throws(() => c.pause("../x", 60), TypeError);
+  assert.throws(() => c.resume("a/b"), TypeError);
+  for (const s of [0, 86401, 1.5, NaN]) assert.throws(() => c.pause("x", s), TypeError);
 });

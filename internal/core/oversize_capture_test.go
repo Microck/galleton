@@ -29,7 +29,9 @@ func TestOversizedCapturedStatePersistsBoundedUncertainty(t *testing.T) {
 		t.Fatalf("bounded uncertain state was not persisted: %v", err)
 	}
 	raw, err := json.Marshal(states[0])
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(raw) > 1<<20 {
 		t.Fatalf("persisted state exceeds vault limit: %d", len(raw))
 	}
@@ -42,11 +44,17 @@ func TestStateSizeCheckReservesCommitTimestampGrowth(t *testing.T) {
 		Secrets: map[string]string{"padding": ""},
 	}
 	base, err := json.Marshal(state)
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	state.Secrets["padding"] = strings.Repeat("x", (1<<20)-len(base))
 	raw, err := json.Marshal(state)
-	if err != nil { t.Fatal(err) }
-	if len(raw) != 1<<20 { t.Fatalf("boundary setup produced %d bytes", len(raw)) }
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(raw) != 1<<20 {
+		t.Fatalf("boundary setup produced %d bytes", len(raw))
+	}
 	if stateFitsVault(state) {
 		t.Fatal("size check did not reserve maximum UpdatedAt growth")
 	}

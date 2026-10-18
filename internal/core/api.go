@@ -5,6 +5,7 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -24,6 +25,7 @@ func Handler(m *Manager, apiToken string) http.Handler {
 // authenticated response has been written.
 func HandlerWithShutdown(m *Manager, apiToken string, shutdown func()) http.Handler {
 	expected := sha256.Sum256([]byte("Bearer " + apiToken))
+	requestLimit := m.requestEnvelopeLimit()
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Pragma", "no-cache")
@@ -74,11 +76,31 @@ func HandlerWithShutdown(m *Manager, apiToken string, shutdown func()) http.Hand
 			}
 		case "providers":
 			if len(path) == 2 && r.Method == "GET" {
-				providers := []map[string]any{}
-				for _, p := range m.providers {
-					providers = append(providers, map[string]any{"name": p.Name, "kind": p.Kind, "origins": p.Origins})
+				writeJSON(w, 200, map[string]any{"providers": m.Providers()})
+				return
+			}
+			if len(path) == 4 && path[3] == "pause" {
+				var result ProviderPause
+				var err error
+				switch r.Method {
+				case "POST":
+					var in struct {
+						Seconds int `json:"seconds"`
+					}
+					if !decodeBody(w, r, &in) {
+						return
+					}
+					result, err = m.Pause(path[2], in.Seconds)
+				case "DELETE":
+					result, err = m.Resume(path[2])
+				default:
+					err = problem(405, "method_not_allowed", "Use POST to pause or DELETE to resume.")
 				}
-				writeJSON(w, 200, map[string]any{"providers": providers})
+				if err != nil {
+					writeError(w, err)
+				} else {
+					writeJSON(w, 200, result)
+				}
 				return
 			}
 		case "sessions":
@@ -143,7 +165,7 @@ func HandlerWithShutdown(m *Manager, apiToken string, shutdown func()) http.Hand
 					result, err = m.Capture(id, in.URL, in.SetCookie)
 				case "request":
 					var in RequestInput
-					if !decodeBody(w, r, &in) {
+					if !decodeBodyLimit(w, r, &in, requestLimit) {
 						return
 					}
 					result, err = m.Request(id, in)
@@ -162,18 +184,21 @@ func HandlerWithShutdown(m *Manager, apiToken string, shutdown func()) http.Hand
 	})
 }
 func decodeBody(w http.ResponseWriter, r *http.Request, out any) bool {
+	return decodeBodyLimit(w, r, out, 2<<20)
+}
+func decodeBodyLimit(w http.ResponseWriter, r *http.Request, out any, maxBytes int64) bool {
 	media := strings.TrimSpace(strings.Split(r.Header.Get("Content-Type"), ";")[0])
 	if !strings.EqualFold(media, "application/json") {
 		writeError(w, problem(415, "unsupported_media_type", "Use application/json."))
 		return false
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, 2<<20)
+	r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
 	d := json.NewDecoder(r.Body)
 	d.DisallowUnknownFields()
 	if err := d.Decode(out); err != nil {
 		var limit *http.MaxBytesError
 		if errors.As(err, &limit) {
-			writeError(w, problem(413, "body_too_large", "Request exceeds 2 MiB."))
+			writeError(w, problem(413, "body_too_large", fmt.Sprintf("Request exceeds the %d MiB API limit.", maxBytes>>20)))
 		} else {
 			writeError(w, invalid("Invalid JSON body or unknown fields."))
 		}

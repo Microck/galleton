@@ -34,6 +34,27 @@ impl fmt::Display for Error {
 }
 impl std::error::Error for Error {}
 
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct ImportCookie {
+    pub name: String,
+    pub value: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub domain: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host_only: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// RFC 3339 timestamp.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub secure: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub http_only: Option<bool>,
+    /// "lax", "strict" or "none".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub same_site: Option<String>,
+}
 #[derive(Clone, Default, Serialize)]
 pub struct Credentials {
     pub provider: String,
@@ -43,6 +64,8 @@ pub struct Credentials {
     pub cookie_header: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub set_cookies: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cookies: Option<Vec<ImportCookie>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub access_token: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -54,6 +77,15 @@ pub struct Credentials {
     pub replace: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expected_revision: Option<u64>,
+}
+#[derive(Debug, Clone, Deserialize)]
+pub struct ProviderInfo {
+    pub name: String,
+    pub kind: String,
+    pub origins: Vec<String>,
+    pub proxied: bool,
+    #[serde(default)]
+    pub paused_until: Option<String>,
 }
 #[derive(Debug, Clone, Deserialize)]
 pub struct SessionStatus {
@@ -86,11 +118,15 @@ pub struct Galleton {
     token: String,
     client: Client,
 }
-fn path(id: &str) -> Result<String, Error> {
-    if id.is_empty() || id.len() > 64 || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-') {
-        return Err(Error::InvalidInput("Invalid session ID"));
+fn name<'a>(value: &'a str, error: &'static str) -> Result<&'a str, Error> {
+    if value.is_empty() || value.len() > 64 || !value.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-') {
+        return Err(Error::InvalidInput(error));
     }
-    Ok(format!("/v1/sessions/{id}"))
+    Ok(value)
+}
+fn path(id: &str) -> Result<String, Error> { Ok(format!("/v1/sessions/{}", name(id, "Invalid session ID")?)) }
+fn pause_path(provider: &str) -> Result<String, Error> {
+    Ok(format!("/v1/providers/{}/pause", name(provider, "Invalid provider name")?))
 }
 impl Galleton {
     pub fn new(base_url: &str, token: &str) -> Result<Self, Error> {
@@ -120,12 +156,12 @@ impl Galleton {
         let response = req.send().map_err(|_| Error::Unavailable)?;
         let status = response.status().as_u16();
         let mut raw = Vec::new();
-        response.take(8 * 1024 * 1024 + 1).read_to_end(&mut raw).map_err(|_| Error::Api(status, ApiError {
+        response.take(128 * 1024 * 1024 + 1).read_to_end(&mut raw).map_err(|_| Error::Api(status, ApiError {
             code: "daemon_unavailable".into(),
             message: "Galleton response was interrupted; the request may already have completed.".into(),
             retry_at: None,
         }))?;
-        if raw.len() > 8 * 1024 * 1024 { return Err(Error::InvalidResponse); }
+        if raw.len() > 128 * 1024 * 1024 { return Err(Error::InvalidResponse); }
         if !(200..300).contains(&status) {
             #[derive(Deserialize)] struct Envelope { error: ApiError }
             let error = serde_json::from_slice::<Envelope>(&raw).map(|e| e.error).unwrap_or_else(|_| ApiError {
@@ -158,9 +194,25 @@ impl Galleton {
     pub fn forget(&self, id: &str) -> Result<(), Error> {
         let _: Value = self.call(Method::DELETE, &path(id)?, None)?; Ok(())
     }
+    pub fn providers(&self) -> Result<Vec<ProviderInfo>, Error> {
+        #[derive(Deserialize)] struct List { providers: Vec<ProviderInfo> }
+        let list: List = self.call(Method::GET, "/v1/providers", None)?;
+        Ok(list.providers)
+    }
+    /// Pauses managed requests and renewals for a provider (only extends an existing pause); returns `paused_until`.
+    pub fn pause(&self, provider: &str, seconds: u32) -> Result<String, Error> {
+        let path = pause_path(provider)?;
+        if !(1..=86400).contains(&seconds) { return Err(Error::InvalidInput("Invalid pause seconds")); }
+        #[derive(Deserialize)] struct Paused { paused_until: String }
+        let paused: Paused = self.call(Method::POST, &path, Some(json!({"seconds": seconds})))?;
+        Ok(paused.paused_until)
+    }
+    pub fn resume(&self, provider: &str) -> Result<(), Error> {
+        let _: Value = self.call(Method::DELETE, &pause_path(provider)?, None)?; Ok(())
+    }
     pub fn request(&self, id: &str, method: &str, url: &str,
                    headers: &HashMap<String, String>, body: &[u8]) -> Result<Response, Error> {
-        if body.len() > 1024 * 1024 { return Err(Error::InvalidInput("Request body exceeds 1 MiB")); }
+        if body.len() > 64 * 1024 * 1024 { return Err(Error::InvalidInput("Request body exceeds 64 MiB")); }
         #[derive(Deserialize)] struct Wire {
             status: u16, headers: HashMap<String, Vec<String>>, body_base64: String, revision: u64,
         }
@@ -176,6 +228,42 @@ mod tests {
     use super::*;
     #[test] fn rejects_remote_daemon() { assert!(Galleton::new("http://example.com", "local").is_err()); }
     #[test] fn rejects_invalid_id() { assert!(path("../other").is_err()); }
+    #[test]
+    fn validates_provider_and_seconds_offline() {
+        assert!(pause_path("../x").is_err());
+        assert!(pause_path("").is_err());
+        assert!(pause_path(&"a".repeat(65)).is_err());
+        assert_eq!(pause_path("my_provider-1").unwrap(), "/v1/providers/my_provider-1/pause");
+        let client = Galleton::new("http://127.0.0.1:1", "local").unwrap();
+        for seconds in [0, 86401] {
+            assert!(matches!(client.pause("x", seconds), Err(Error::InvalidInput(_))));
+        }
+        assert!(matches!(client.resume("a/b"), Err(Error::InvalidInput(_))));
+    }
+    #[test]
+    fn pause_posts_seconds_to_provider_path() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            let mut buf = [0u8; 4096];
+            while !String::from_utf8_lossy(&request).contains("{\"seconds\":60}") {
+                let n = socket.read(&mut buf).unwrap();
+                if n == 0 { break; }
+                request.extend_from_slice(&buf[..n]);
+            }
+            let body = r#"{"provider":"x","paused_until":"2026-01-01T00:00:00Z"}"#;
+            write!(socket, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).unwrap();
+            String::from_utf8(request).unwrap()
+        });
+        let client = Galleton::new(&format!("http://{address}"), "local").unwrap();
+        assert_eq!(client.pause("x", 60).unwrap(), "2026-01-01T00:00:00Z");
+        let request = server.join().unwrap();
+        assert!(request.starts_with("POST /v1/providers/x/pause HTTP/1.1"), "{request}");
+    }
     #[test] fn accepts_loopback() { assert!(Galleton::new("http://127.0.0.1:8766", "local").is_ok()); }
     #[test] fn rejects_header_injection() { assert!(Galleton::new("http://127.0.0.1:8766", "a\r\nb").is_err()); }
     #[test]
