@@ -75,8 +75,10 @@ func Detect(data []byte) string {
 	if len(trimmed) > 0 && (trimmed[0] == '{' || trimmed[0] == '[') {
 		return JSON
 	}
-	for _, line := range strings.Split(string(trimmed), "\n") {
-		line = strings.TrimSpace(line)
+	for len(trimmed) > 0 {
+		var rawLine []byte
+		rawLine, trimmed, _ = bytes.Cut(trimmed, []byte("\n"))
+		line := strings.TrimSpace(string(rawLine))
 		lower := strings.ToLower(line)
 		if strings.HasPrefix(lower, "# netscape http cookie file") || strings.HasPrefix(lower, "# http cookie file") || strings.HasPrefix(line, "#HttpOnly_") {
 			return Netscape
