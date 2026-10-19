@@ -16,7 +16,7 @@
       "cookie_domain": ".www.vinted.com",
       "protected_cookies": ["access_token_web", "refresh_token_web"],
       "block_signatures": [
-        {"status": [403], "body_contains": "captcha-delivery.com"},
+        {"status": [200, 403], "body_contains": "captcha-delivery.com"},
         {"status": [403, 503], "header": "Cf-Mitigated", "header_contains": "challenge"},
         {"status": [403], "not_json": true}
       ],

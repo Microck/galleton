@@ -272,7 +272,20 @@ func performRefresh(s *State, p *Provider, client *http.Client, req *http.Reques
 	}
 	defer resp.Body.Close()
 	now := time.Now().UTC()
-	success2xx := resp.StatusCode >= 200 && resp.StatusCode < 300
+	raw, readErr := io.ReadAll(io.LimitReader(resp.Body, (1<<20)+1))
+	readOK := readErr == nil && len(raw) <= 1<<20
+	var doc any
+	var jsonErr error
+	blocked := false
+	if readOK {
+		doc, jsonErr = parseJSON(raw)
+		// A challenge page from a bot-protection layer, even one served with
+		// a 2xx status: the request did not reach the session logic, so the
+		// credential is still unspent.
+		code, _ := tokenAt(doc, "/error")
+		blocked = !(p.Kind == "oauth2" && code == "invalid_grant") && p.blocked(resp, raw, jsonErr == nil)
+	}
+	success2xx := resp.StatusCode >= 200 && resp.StatusCode < 300 && !blocked
 	retained := 0
 	var cookieProblem *Problem
 	held := protectedHeld(s.Cookies, p.protected, now)
@@ -299,20 +312,13 @@ func performRefresh(s *State, p *Provider, client *http.Client, req *http.Reques
 			}
 		}
 	}
-	raw, readErr := io.ReadAll(io.LimitReader(resp.Body, (1<<20)+1))
-	if readErr != nil || len(raw) > 1<<20 {
+	if !readOK {
 		return transientOrUncertain(p)
 	}
-	doc, jsonErr := parseJSON(raw)
-	if !success2xx {
-		code, _ := tokenAt(doc, "/error")
-		if !(p.Kind == "oauth2" && code == "invalid_grant") && p.blocked(resp, raw, jsonErr == nil) {
-			// A challenge page from a bot-protection layer: the request did not
-			// reach the session logic, so the credential is still unspent.
-			e := problem(503, "upstream_blocked", "The provider's bot protection refused renewal; credentials were kept and renewal will retry after backoff.")
-			e.RetryAt = parseRetryAfter(resp.Header.Get("Retry-After"), now)
-			return e
-		}
+	if blocked {
+		e := problem(503, "upstream_blocked", "The provider's bot protection refused renewal; credentials were kept and renewal will retry after backoff.")
+		e.RetryAt = parseRetryAfter(resp.Header.Get("Retry-After"), now)
+		return e
 	}
 	if resp.StatusCode == 429 {
 		e := problem(503, "retry_later", "The provider rate-limited renewal.")
