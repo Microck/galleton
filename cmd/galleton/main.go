@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -28,7 +29,7 @@ func main() {
 }
 func run(args []string) error {
 	if len(args) == 0 || args[0] == "help" || args[0] == "--help" {
-		fmt.Println("Galleton " + core.Version + "\n\nCommands: init, serve, shutdown, connect, status, list, refresh, forget, headers, request, providers, pause, resume, version\n\nFlags follow the command, BEFORE positional IDs.\n  galleton init --dir ./state\n  galleton serve --dir ./state --config ./adapters.json\n  galleton connect --dir ./state account < credentials.json\n  galleton connect --dir ./state --provider vinted --cookies cookies.txt account\n  galleton status --dir ./state account\n  galleton pause --dir ./state --seconds 900 vinted\n\nconnect --cookies reads a cookie export: Netscape cookies.txt, Cookie-Editor\nor EditThisCookie JSON, or a Cookie header. The format is detected; override\nit with --format.\n\nThe daemon listens on 127.0.0.1:8766. See README.md for adapters and SDKs.")
+		fmt.Println("Galleton " + core.Version + "\n\nCommands: init, serve, shutdown, connect, status, list, refresh, forget, headers, request, providers, pause, resume, version\n\nFlags follow the command, BEFORE positional IDs.\n  galleton init --dir ./state\n  galleton serve --dir ./state --config ./adapters.json\n  galleton connect --dir ./state account < credentials.json\n  galleton connect --dir ./state --provider vinted --cookies cookies.txt account\n  galleton status --dir ./state account\n  galleton pause --dir ./state --seconds 900 vinted\n\nserve --pause PROVIDER=SECONDS (repeatable) starts with that provider paused,\nbefore the first renewal scan. Like the pause command it only extends a saved\npause and survives a restart.\n\nconnect --cookies reads a cookie export: Netscape cookies.txt, Cookie-Editor\nor EditThisCookie JSON, or a Cookie header. The format is detected; override\nit with --format.\n\nThe daemon listens on 127.0.0.1:8766. See README.md for adapters and SDKs.")
 		return nil
 	}
 	if args[0] == "version" {
@@ -51,6 +52,8 @@ func run(args []string) error {
 	replace := f.Bool("replace", false, "reconnect an existing session; needs --expected-revision (connect --cookies)")
 	expectedRevision := f.Uint64("expected-revision", 0, "current session revision when replacing (connect --cookies)")
 	seconds := f.Int("seconds", 0, "pause length in seconds, 1-86400 (pause)")
+	var startPauses pauseFlags
+	f.Var(&startPauses, "pause", "start with a provider paused, as PROVIDER=SECONDS (1-86400); repeatable (serve)")
 	if err := f.Parse(args[1:]); err != nil {
 		return err
 	}
@@ -81,6 +84,14 @@ func run(args []string) error {
 		manager, err := core.NewManager(vault, cfg)
 		if err != nil {
 			return err
+		}
+		// Apply start pauses before the scheduler runs or any client can call,
+		// so no renewal or managed request reaches a provider a client wanted
+		// held while the daemon was stopped.
+		for _, sp := range startPauses {
+			if _, err := manager.Pause(sp.provider, sp.seconds); err != nil {
+				return fmt.Errorf("--pause %s=%d: %w", sp.provider, sp.seconds, err)
+			}
 		}
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 		defer stop()
@@ -273,4 +284,33 @@ func readCookies(path, format string, hosts []string) ([]cookiefile.Cookie, stri
 		return nil, used, fmt.Errorf("cookie export: %w", err)
 	}
 	return cookies, used, nil
+}
+
+type startPause struct {
+	provider string
+	seconds  int
+}
+
+// pauseFlags collects repeated serve --pause PROVIDER=SECONDS values.
+type pauseFlags []startPause
+
+func (p *pauseFlags) String() string {
+	parts := make([]string, len(*p))
+	for i, sp := range *p {
+		parts[i] = fmt.Sprintf("%s=%d", sp.provider, sp.seconds)
+	}
+	return strings.Join(parts, ",")
+}
+
+func (p *pauseFlags) Set(value string) error {
+	name, raw, ok := strings.Cut(value, "=")
+	if !ok || name == "" {
+		return errors.New("want PROVIDER=SECONDS")
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < 1 || n > 86400 {
+		return errors.New("seconds must be 1-86400")
+	}
+	*p = append(*p, startPause{provider: name, seconds: n})
+	return nil
 }

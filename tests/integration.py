@@ -130,9 +130,17 @@ for (const id of ["oauth-account", "cookie-account"]) {
             daemon.wait(timeout=10)
             assert daemon.returncode == 0
             checks.append("authenticated CLI shutdown drains the daemon")
-            daemon = subprocess.Popen(daemon_args, stderr=subprocess.DEVNULL)
+            daemon = subprocess.Popen(daemon_args + ["--pause", "cookie=60"], stderr=subprocess.DEVNULL)
             processes.append(daemon)
             eventually(lambda: len(client.list()) == 2)
+            assert any(p.get("paused_until") for p in client.providers() if p["name"] == "cookie")
+            try:
+                client.request("cookie-account", provider_url + "/me")
+                raise AssertionError("provider paused at start served a managed request")
+            except GalletonError as exc:
+                assert exc.code == "provider_paused"
+            client.resume("cookie")
+            checks.append("serve --pause starts with the provider held until a client resumes it")
             for account in ["oauth-account", "cookie-account"]:
                 assert client.request(account, provider_url + "/me").json()["ok"]
             checks.append("daemon restart preserves both rotated credential types")
