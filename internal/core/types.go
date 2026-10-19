@@ -9,7 +9,7 @@ import (
 	"github.com/Microck/galleton/cookiefile"
 )
 
-const Version = "0.1.0"
+const Version = "0.1.1"
 
 // Provider is trusted operator configuration, never supplied by an API caller.
 // URLs are explicitly allowlisted. Templates are substitutions, not executable code.

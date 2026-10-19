@@ -245,7 +245,7 @@ func (p *Provider) withDeadline(req *http.Request, b *budget) (*http.Request, co
 	return req.WithContext(ctx), cancel
 }
 
-// blocked reports whether a non-2xx response matches a configured
+// blocked reports whether a renewal response matches a configured
 // bot-protection signature.
 func (p *Provider) blocked(resp *http.Response, body []byte, isJSON bool) bool {
 	for _, sig := range p.BlockSignatures {
@@ -276,9 +276,14 @@ func validateBlockSignatures(signatures []BlockSignature) error {
 			return errors.New("each block signature needs 1–8 status codes")
 		}
 		for _, status := range sig.Status {
-			// 401 always means the credential was rejected; 2xx/3xx are not refusals.
-			if status < 400 || status > 599 || status == 401 {
-				return errors.New("block signature status codes must be 400–599, excluding 401")
+			// 401 always means the credential was rejected and 3xx is a
+			// redirect. A 2xx is normally a renewal, so it only counts as a
+			// challenge when the body carries a marker of one.
+			if status == 401 || status < 200 || status > 599 || status >= 300 && status < 400 {
+				return errors.New("block signature status codes must be 2xx or 400–599, excluding 401")
+			}
+			if status < 300 && sig.BodyContains == "" {
+				return errors.New("a block signature for a 2xx status needs body_contains; a header or not_json alone would hide successful renewals")
 			}
 		}
 		if sig.BodyContains == "" && sig.Header == "" && !sig.NotJSON {

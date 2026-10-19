@@ -93,9 +93,9 @@ cookie adapters require an endpoint that returns replacement `Set-Cookie` values
 every provider can opt into a few extras, all off by default:
 
 - an egress `proxy` (http, https, socks5, socks5h) that fails closed and never falls back to a direct connection
-- `block_signatures`, so a bot-protection challenge page means "try later" instead of "log in again"
+- `block_signatures`, so a bot-protection challenge page means "try later" instead of "log in again", including one served with HTTP 200
 - a `cookie_domain` shared by listed origins, and `protected_cookies` that only renewal may replace
-- `min_interval_ms` between upstream calls, plus a pause any client can set with `POST /v1/providers/{name}/pause` that survives a restart
+- `min_interval_ms` between upstream calls, plus a pause any client can set with `POST /v1/providers/{name}/pause` (or `serve --pause` at start) that survives a restart
 - `keep_alive` for managed requests and per-adapter request/response size limits
 
 [`examples/adapters.vinted.json`](examples/adapters.vinted.json) uses most of them for a Vinted web session.

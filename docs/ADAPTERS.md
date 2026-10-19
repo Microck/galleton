@@ -134,13 +134,13 @@ Bot-protection layers answer with a challenge page while the credential is still
 
 ```json
 "block_signatures": [
-  {"status": [403], "body_contains": "captcha-delivery.com"},
+  {"status": [200, 403], "body_contains": "captcha-delivery.com"},
   {"status": [403, 503], "header": "Cf-Mitigated", "header_contains": "challenge"},
   {"status": [403], "not_json": true}
 ]
 ```
 
-A signature matches when the status is listed and every configured matcher holds: `body_contains` (a substring of the response body), `header` (present) with optional `header_contains`, and `not_json` (the body is not a JSON document, so it is not the provider's own error). Status codes must be 400–599 and never 401, and each signature needs at least one matcher besides the status, so a real revocation is not hidden.
+A signature matches when the status is listed and every configured matcher holds: `body_contains` (a substring of the response body), `header` (present) with optional `header_contains`, and `not_json` (the body is not a JSON document, so it is not the provider's own error). Status codes must be 2xx or 400–599, never 401 or 3xx, and each signature needs at least one matcher besides the status, so a real revocation is not hidden. Some bot walls serve their challenge page with HTTP 200; a signature that lists a 2xx status must set `body_contains`, so only a body carrying the challenge marker counts and an ordinary successful renewal is never read as a block. Pick a marker the provider's real renewal response cannot contain.
 
 A matching renewal response becomes `upstream_blocked`: the session moves to `retry_wait` with exponential backoff, `Retry-After` is honored (bounded to 24 hours), credentials are kept, and protected cookies in the response are ignored. Clients keep receiving still-valid credentials meanwhile. HTTP 401 and OAuth `invalid_grant` remain `reauth_required` even when a signature would match. A 403 that matches no signature also remains `reauth_required`.
 
@@ -158,6 +158,8 @@ DELETE /v1/providers/vinted/pause
 ```
 
 While paused, managed requests fail with `provider_paused` and a `retry_at`, the scheduler starts no renewals, and `/headers` serves still-valid credentials without renewing. A call that was already waiting for its turn when the pause was set is refused too, before anything is sent; the session stays as it was and the pacing slot it held is released. A pause only extends an existing one (1–86400 seconds per call). It is saved encrypted in the state directory, so a daemon restart keeps it; if saving fails the pause still applies and the call reports `storage_failure`. `GET /v1/providers` shows `paused_until`.
+
+A client that starts the daemon can hold a provider from the first moment with `galleton serve --pause vinted=900` (repeat the flag for more providers). The pause is applied and saved before the scheduler's first scan and before the API listens, with the same rules as the API call: it only extends a saved pause, and an unknown provider or a pause that cannot be saved stops `serve`. Start paused, then resume or extend once the client has checked its own state, and no renewal can slip in between the start and the client's first call.
 
 ### Keep-alive
 

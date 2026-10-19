@@ -229,11 +229,66 @@ func TestBlockSignatureTurnsChallenge5xxIntoBackoff(t *testing.T) {
 	}
 }
 
+func TestBlockSignatureMatchesChallengeServedWithOK(t *testing.T) {
+	var challenge atomic.Bool
+	challenge.Store(true)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if challenge.Load() {
+			// Some bot walls answer 200 with a challenge page and try to set
+			// a guest credential cookie; it must not replace the real one.
+			http.SetCookie(w, &http.Cookie{Name: "sid", Value: "guest", Path: "/"})
+			http.SetCookie(w, &http.Cookie{Name: "bot", Value: "marker", Path: "/"})
+			w.Header().Set("Retry-After", "60")
+			fmt.Fprint(w, `<html><script src="https://ct.captcha-delivery.com/c.js"></script></html>`)
+			return
+		}
+		http.SetCookie(w, &http.Cookie{Name: "sid", Value: "renewed", Path: "/"})
+		fmt.Fprint(w, `<html>ok</html>`)
+	}))
+	defer server.Close()
+	p := cookieProvider(server.URL)
+	p.ProtectedCookies = []string{"sid"}
+	p.BlockSignatures = []BlockSignature{{Status: []int{200, 403}, BodyContains: "captcha-delivery.com"}}
+	m, v, _ := managerFor(t, p)
+	if _, err := m.Import("alice", Import{Provider: "test", CookieOrigin: server.URL, CookieHeader: "sid=seed"}); err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now()
+	_, err := m.Refresh("alice")
+	wantCode(t, err, "upstream_blocked")
+	if p := AsProblem(err); p.RetryAt.Before(started.Add(59 * time.Second)) {
+		t.Fatalf("Retry-After not honoured: %v", p.RetryAt)
+	}
+	if meta, _ := m.Status("alice"); meta.Status != "retry_wait" {
+		t.Fatalf("challenge 200 became %s instead of a retry", meta.Status)
+	}
+	values := map[string]string{}
+	states, _ := v.LoadAll()
+	for _, c := range states[0].Cookies {
+		values[c.Cookie.Name] = c.Cookie.Value
+	}
+	if values["sid"] != "seed" || values["bot"] != "marker" {
+		t.Fatalf("cookies after a 200 challenge: %v", values)
+	}
+	// A 200 without the marker is still a renewal.
+	challenge.Store(false)
+	due(m)
+	if _, err := m.Refresh("alice"); err != nil {
+		t.Fatal(err)
+	}
+	if h, err := m.Headers("alice", server.URL+"/me"); err != nil || !strings.Contains(h.Headers["Cookie"], "sid=renewed") {
+		t.Fatalf("%v %#v", err, h)
+	}
+}
+
 func TestBlockSignatureValidation(t *testing.T) {
 	for _, sigs := range [][]BlockSignature{
 		{{Status: []int{403}}},
 		{{Status: []int{401}, NotJSON: true}},
 		{{Status: []int{200}, NotJSON: true}},
+		{{Status: []int{204}, Header: "X-Challenge"}},
+		{{Status: []int{302}, BodyContains: "captcha"}},
+		{{Status: []int{100}, BodyContains: "captcha"}},
 		{{Status: nil, NotJSON: true}},
 		{{Status: []int{403}, HeaderContains: "x"}},
 	} {
@@ -242,6 +297,11 @@ func TestBlockSignatureValidation(t *testing.T) {
 		if _, err := compileProviders(Config{Providers: []Provider{p}}); err == nil {
 			t.Fatalf("accepted %#v", sigs)
 		}
+	}
+	p := providerFor("http://127.0.0.1:11111")
+	p.BlockSignatures = []BlockSignature{{Status: []int{200}, BodyContains: "captcha-delivery.com", Header: "X-DataDome"}}
+	if _, err := compileProviders(Config{Providers: []Provider{p}}); err != nil {
+		t.Fatal(err)
 	}
 }
 
